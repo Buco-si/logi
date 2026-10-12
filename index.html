@@ -12583,6 +12583,12 @@ const S = { kinder:[], eintraege:[], meta:{}, view:"home", kindId:null, filter:"
 async function load(){
   S.kinder = (await getAll("kinder"));
   S.eintraege = (await getAll("eintraege"));
+  const known = new Set(S.kinder.map(k => k.id));
+  const orphans = [...new Set(S.eintraege.filter(e => !e.geloescht && !known.has(e.kindId)).map(e => e.kindId))];
+  if (orphans.length) {
+    const ph = orphans.map(id => ({ id, kuerzel:id.toUpperCase(), klasse:"", platzhalter:true, geloescht:false, angelegt:"1970-01-01T00:00:00.000Z", geaendert:"1970-01-01T00:00:00.000Z" }));
+    await putMany("kinder", ph); S.kinder = await getAll("kinder");
+  }
   const m = await getAll("meta"); S.meta = Object.fromEntries(m.map(x => [x.k, x.v]));
 }
 const aktiveKinder = () => S.kinder.filter(k => !k.geloescht).sort((a,b) => a.kuerzel.localeCompare(b.kuerzel,"de"));
@@ -12640,7 +12646,7 @@ async function mergePayload(p){
 function buildPayload(since){
   const pick = arr => arr.filter(x => !since || x.geaendert > since);
   return { app:"LBE", v:1, von:S.meta.lehrkraft || "", erstellt:nowIso(), seit:since || null,
-           kinder:pick(S.kinder), eintraege:pick(S.eintraege) };
+           kinder:S.kinder.slice(), eintraege:pick(S.eintraege) };
 }
 
 
@@ -12760,7 +12766,7 @@ function renderHome(){
     const es = eintraegeVon(k.id);
     const strip = MESK.map(a => { const n = es.filter(e => e.mesk === a.k).length; return `<i class="${n ? "g-"+a.g : ""}" title="${esc(a.s)}: ${n}"></i>`; }).join("");
     return `<button class="card" data-kind="${esc(k.id)}">
-      <div class="t"><span class="kz">${esc(k.kuerzel)} ${k.beispiel ? '<span class="ex">Beispiel</span>' : ""}</span><span class="meta">${esc(k.klasse||"")}</span></div>
+      <div class="t"><span class="kz">${esc(k.kuerzel)} ${k.beispiel ? '<span class="ex">Beispiel</span>' : ""}${k.platzhalter ? '<span class="ex">vorläufig</span>' : ""}</span><span class="meta">${esc(k.klasse||"")}</span></div>
       <div class="strip" aria-label="Einträge je MesK-Bereich">${strip}</div>
       <div class="meta">${es.length} Einträge${es[0] ? " · zuletzt " + daysAgo(es[0].ts) : ""}</div></button>`; }).join("");
   const letzter = S.meta.letzterAbgleich ? `Letzter Abgleich: ${daysAgo(S.meta.letzterAbgleich)}` : "Noch kein Abgleich";
@@ -12901,7 +12907,7 @@ function renderSettings(){
 
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
-const APP_VERSION = "6";
+const APP_VERSION = "7";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -12918,7 +12924,7 @@ async function makeExport(){
   const scope = $("sScope").value;
   const since = scope === "neu" ? S.meta.letzterExport : scope === "alles" ? null : new Date(Date.now() - (+scope)*864e5).toISOString();
   const payload = buildPayload(since);
-  if (!payload.eintraege.length && !payload.kinder.length) { flash("Seit dem letzten Senden gibt es nichts Neues.", true); return null; }
+  if (!payload.eintraege.length && !S.kinder.some(k => !since || k.geaendert > since)) { flash("Seit dem letzten Senden gibt es nichts Neues.", true); return null; }
   return { sealed: await seal(payload, S.meta.teampw), count: payload.eintraege.length };
 }
 async function afterExport(){ await setMeta("letzterExport", nowIso()); await setMeta("letzterAbgleich", nowIso()); await load(); }
