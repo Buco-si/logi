@@ -12712,6 +12712,7 @@ function render(){
       $("cSit").value = draft.sit; $("cWhen").value = draft.when || $("cWhen").value; $("cText").value = draft.text; S.manualMesk = draft.manual;
       $("cMesk").value = draft.mesk; if (draft.text) updateSuggestion(); } }
   if (S.view === "sync" && S.qr) drawQr();
+  if (S.view === "sync" && S.msg) drawMsg();
 }
 const meskOptions = sel => `<option value="">Kein Bereich</option>` + MESK.map(a => `<option value="${a.k}"${a.k===sel?" selected":""}>${esc(a.l)}</option>`).join("");
 
@@ -12851,8 +12852,8 @@ function renderSync(){
      <div class="hint">${Object.keys(sc.parts).length} von ${sc.total} Codes eingelesen.</div>` : "";
   return `<section class="panel"><h2>So funktioniert der Abgleich</h2>
       <ol class="steps"><li>Beide nutzen dasselbe <b>Team-Passwort</b>. Es verlässt nie das Gerät und wird nur persönlich weitergegeben.</li>
-      <li><b>Senden:</b> Dein Gerät zeigt die neuen Einträge als QR-Code(s) oder erstellt eine verschlüsselte Datei.</li>
-      <li><b>Empfangen:</b> Das andere Gerät scannt die Codes oder öffnet die Datei. Doppelte Einträge werden erkannt.</li></ol>
+      <li><b>Senden:</b> „Als Nachricht senden“ → per Threema, Signal oder Mail an die Kollegin/den Kollegen schicken. Der Text ist verschlüsselt.</li>
+      <li><b>Empfangen:</b> Nachricht lange antippen → Kopieren, dann hier „Aus Zwischenablage einlesen“. Doppelte Einträge werden erkannt.</li></ol>
       <div class="hint">Version ${APP_VERSION} – beide Geräte sollten dieselbe Version anzeigen.</div></section>
     <section class="panel"><h3>Team-Passwort</h3>
       ${pwSet ? `<div class="row"><span class="hint">Auf diesem Gerät gespeichert.</span><button class="btn ghost" data-pw-clear>Passwort entfernen</button></div>`
@@ -12868,15 +12869,21 @@ function renderSync(){
         <option value="7">Letzte 7 Tage: ${buildPayload(new Date(Date.now()-7*864e5).toISOString()).eintraege.length} Einträge</option>
         <option value="alles">Alles: ${S.eintraege.length} Einträge (inkl. Löschungen)</option>
         <option value="neu">Nur neu seit meinem letzten Senden${seit ? " (" + new Date(seit).toLocaleDateString("de-DE") + ")" : ""}: ${nNeu} Einträge</option></select></div></div>
-      <div class="hint">Doppelte Einträge sind kein Problem – das andere Gerät übernimmt nur, was ihm fehlt. Bei sehr vielen Einträgen lieber „Als Datei speichern“ nutzen.</div>
-      <div class="row"><button class="btn primary" data-send-qr ${pwSet ? "" : "disabled"}>QR-Code anzeigen</button>
-        <button class="btn" data-send-file ${pwSet ? "" : "disabled"}>Als Datei speichern</button>
-        ${navigator.canShare ? `<button class="btn" data-send-share ${pwSet ? "" : "disabled"}>Datei teilen …</button>` : ""}</div>
+      <div class="hint">Doppelte Einträge sind kein Problem – das andere Gerät übernimmt nur, was ihm fehlt.</div>
+      <div class="row"><button class="btn primary" data-send-msg ${pwSet ? "" : "disabled"}>Als Nachricht senden</button>
+        <button class="btn" data-send-qr ${pwSet ? "" : "disabled"}>QR-Code anzeigen</button>
+        <button class="btn ghost" data-send-file ${pwSet ? "" : "disabled"}>Als Datei speichern</button></div>
+      <div class="hint">„Als Nachricht senden“: verschlüsselter Text für Threema, Signal oder E-Mail. Auf dem anderen Handy die Nachricht kopieren und unter „Empfangen“ einfügen.</div>
       ${pwSet ? "" : `<div class="hint">Zuerst das Team-Passwort festlegen.</div>`}
       <div id="shareArea"></div>
       <div id="qrArea"></div>
     </section>
     <section class="panel"><h3>Empfangen</h3>
+      <div class="field"><label for="pasteIn">Abgleich-Nachricht einfügen</label>
+        <textarea id="pasteIn" style="min-height:80px" placeholder="Nachricht im Messenger oder in der Mail lange antippen → Kopieren, dann hier lange antippen → Einfügen"></textarea></div>
+      <div class="row" style="margin-top:8px">${navigator.clipboard?.readText ? `<button class="btn primary" data-clip>Aus Zwischenablage einlesen</button>` : ""}
+        <button class="btn ${navigator.clipboard?.readText ? "" : "primary"}" data-paste>Eingefügten Text einlesen</button></div>
+      <div class="hint" style="margin-top:12px">Oder per QR-Code bzw. Datei:</div>
       <div class="row">
         ${navigator.mediaDevices?.getUserMedia ? `<button class="btn primary" data-scan-live>Mit Kamera scannen</button>` : ""}
         <label class="btn" for="scanIn" style="display:inline-block">QR-Code fotografieren</label>
@@ -12887,10 +12894,6 @@ function renderSync(){
       </div>
       ${prog}
       <div id="liveArea"></div>
-      <details><summary class="hint">Code-Text einfügen (z. B. aus dem QR-Scanner der Kamera-App)</summary>
-        <div class="field" style="margin-top:8px"><label for="pasteIn">Text des QR-Codes (beginnt mit „LBE1:“, auch mehrere untereinander)</label>
-        <textarea id="pasteIn" style="min-height:80px" placeholder="LBE1:…"></textarea></div>
-        <div class="row" style="margin-top:8px"><button class="btn" data-paste>Einlesen</button></div></details>
       <div class="hint">Tipp: Am sendenden Handy die Helligkeit hochdrehen. Kamera ruhig und gerade halten, ca. 15–25 cm Abstand, ohne Spiegelungen.</div>
       ${S.pendingImport ? `<form class="row" id="pwAsk" autocomplete="off"><div class="field"><label for="pw2">Team-Passwort des sendenden Geräts</label><input type="password" id="pw2"></div><button class="btn primary" type="submit">Einlesen</button></form>
         <label class="hint" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pwSave" checked> Dieses Passwort hier als Team-Passwort speichern</label>
@@ -12921,7 +12924,8 @@ function renderSettings(){
 
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
-const APP_VERSION = "10";
+const MSG_CHUNK = 2800;
+const APP_VERSION = "11";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -13010,6 +13014,33 @@ function addPart(text){
   S.scan.set = set; S.scan.total = +n; S.scan.parts[+i] = chunk;
   return Object.keys(S.scan.parts).length === S.scan.total;
 }
+/* Text aus Nachricht/Datei/QR-Scanner: Leerzeichen und Zeilenumbrüche (Mail-Umbruch) werden ignoriert */
+async function importText(txt){
+  const s = String(txt || "").replace(/\s+/g, "");
+  const toks = s.split("LBE1:").slice(1).map(t => /^([a-z0-9]+):(\d+)\/(\d+):([A-Za-z0-9_-]+)/.exec(t)).filter(Boolean);
+  if (!toks.length) {
+    if (s.length > 40 && /^[A-Za-z0-9_-]+$/.test(s)) { await tryImport(s); return true; }
+    flash("In dem Text wurde kein Logbuch-Abgleich gefunden. Bitte die ganze Nachricht kopieren.", true); return false;
+  }
+  let complete = false;
+  for (const [, set, i, n, chunk] of toks) { try { complete = addPart(`LBE1:${set}:${i}/${n}:${chunk}`); } catch(_) {} }
+  if (complete) { const all = Array.from({length:S.scan.total}, (_,i) => S.scan.parts[i+1]).join(""); const p = $("pasteIn"); if (p) p.value = ""; await tryImport(all); }
+  else { render(); flash(`Teil ${Object.keys(S.scan.parts).length} von ${S.scan.total} eingelesen. Bitte die nächste Nachricht kopieren und einfügen.`); }
+  return true;
+}
+async function copyPlain(t){
+  try { await navigator.clipboard.writeText(t); return true; } catch(_) {}
+  try { const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta); ta.select(); const ok = document.execCommand("copy"); ta.remove(); return ok; } catch(_) { return false; }
+}
+function drawMsg(){
+  const m = S.msg, a = $("shareArea"); if (!m || !a) return;
+  const canShare = !!navigator.share;
+  a.innerHTML = `<div class="msg" style="margin-top:10px"><b>Abgleich mit ${m.count} Einträgen ist vorbereitet${m.parts.length > 1 ? ` – ${m.parts.length} Nachrichten, bitte alle nacheinander senden` : ""}.</b>
+    ${m.parts.map((p,i) => `<div class="row" style="margin-top:8px;align-items:center">${m.parts.length > 1 ? `<span>Nachricht ${i+1}/${m.parts.length}${m.sent[i] ? " ✓" : ""}</span>` : ""}
+      ${canShare ? `<button class="btn primary" data-msg-share="${i}">Teilen …</button>` : ""}<button class="btn" data-msg-copy="${i}">Kopieren</button></div>`).join("")}
+    <div class="hint" style="margin-top:8px">${canShare ? "„Teilen“ öffnet z. B. Threema oder Mail. Oder " : ""}„Kopieren“ und im Messenger oder in der Mail einfügen. Nicht an Dritte senden – der Inhalt ist mit dem Team-Passwort verschlüsselt.</div>
+    <div class="row" style="margin-top:8px"><button class="btn" data-msg-done>Fertig – ist gesendet</button><button class="btn ghost" data-msg-cancel>Abbrechen</button></div></div>`;
+}
 async function tryImport(sealed){
   const pw = S.meta.teampw;
   if (!pw) { S.pendingImport = sealed; render(); return; }
@@ -13033,7 +13064,7 @@ async function doImport(sealed, pw){
 /* ================= Ereignisse ================= */
 document.addEventListener("click", async ev => {
   const b = ev.target.closest("button"); if (!b) return; const d = b.dataset;
-  if (d.nav) { S.view = d.nav; S.confirm = null; stopAuto(); stopLive(); S.qr = null; render(); window.scrollTo({top:0}); return; }
+  if (d.nav) { S.view = d.nav; S.confirm = null; stopAuto(); stopLive(); S.qr = null; S.msg = null; render(); window.scrollTo({top:0}); return; }
   if (d.kind) { S.view = "kind"; S.kindId = d.kind; S.filter = "all"; S.confirm = null; S.edit = null; render(); window.scrollTo({top:0}); return; }
   if ("home" in d) { S.view = "home"; render(); return; }
   if (d.filter) { S.filter = d.filter; render(); return; }
@@ -13063,24 +13094,26 @@ document.addEventListener("click", async ev => {
   if ("qrPrev" in d) { S.qr.idx--; drawQr(); return; }
   if ("qrAuto" in d) { if (S.qr.auto) stopAuto(); else { S.qr.auto = true; S.autoTimer = setInterval(() => { if (!S.qr) return stopAuto(); S.qr.idx = (S.qr.idx + 1) % S.qr.parts.length; drawQr(); }, 1400); } drawQr(); return; }
   if ("scanLive" in d) return startLive();
-  if ("paste" in d) { const lines = $("pasteIn").value.split(/\s+/).map(x => x.trim()).filter(x => x.startsWith("LBE1:"));
-    if (!lines.length) { flash("Kein Logbuch-Code gefunden. Der Text muss mit „LBE1:“ beginnen.", true); return; }
-    let complete = false; for (const l of lines) { try { complete = addPart(l); } catch(_) {} }
-    if (complete) { const all = Array.from({length:S.scan.total}, (_,i) => S.scan.parts[i+1]).join(""); await tryImport(all); }
-    else { render(); flash(`${Object.keys(S.scan.parts).length} von ${S.scan.total} Codes eingelesen. Bitte den nächsten einfügen.`); }
-    return; }
+  if ("paste" in d) { await importText($("pasteIn").value); return; }
+  if ("clip" in d) { let t = ""; try { t = await navigator.clipboard.readText(); } catch(_) {}
+    if (!t) { flash("Die Zwischenablage konnte nicht gelesen werden. Bitte den Text ins Feld einfügen (lange antippen → Einfügen) und „Eingefügten Text einlesen“ tippen.", true); $("pasteIn")?.focus(); return; }
+    await importText(t); return; }
   if ("scanStop" in d) { stopLive(); render(); return; }
   if ("qrDone" in d) { stopAuto(); try { S.wake?.release(); } catch(_) {} const n = S.qr.count; await afterExport(); S.qr = null; render(); flash(`Abgleich mit ${n} Einträgen gesendet. Beim nächsten Mal werden nur neue Einträge übertragen.`); return; }
-  if ("sendShare" in d) { let x; try { x = await makeExport(); } catch (e) { flash("Die Datei konnte nicht erstellt werden (" + (e?.message || e) + ").", true); return; } if (!x) return;
-    S.prepared = { name:`logbuch-abgleich_${(S.meta.lehrkraft||"").replace(/[^A-Za-z0-9]/g,"")}_${new Date().toISOString().slice(0,10)}.txt`, data:x.sealed, count:x.count };
-    $("shareArea").innerHTML = `<div class="msg">Datei mit ${x.count} Einträgen ist vorbereitet. <button class="btn primary" data-share-now>Jetzt teilen</button></div>`; return; }
-  if ("shareNow" in d) { const p = S.prepared; if (!p) return;
-    let file; try { file = new File([p.data], p.name, { type:"text/plain" }); } catch(_) {}
-    if (!file || !navigator.canShare || !navigator.canShare({ files:[file] })) { flash("Dieses Gerät kann die Datei nicht teilen. Bitte „Als Datei speichern“ nutzen.", true); return; }
-    navigator.share({ files:[file], title:"Logbuch-Abgleich" })
-      .then(async () => { S.prepared = null; await afterExport(); render(); flash(`Abgleich-Datei mit ${p.count} Einträgen geteilt.`); })
-      .catch(e => { if (e && e.name === "AbortError") flash("Teilen abgebrochen."); else flash("Teilen hat nicht geklappt (" + (e?.name || e) + "). Bitte „Als Datei speichern“ nutzen.", true); });
+  if ("sendMsg" in d) { let x; try { x = await makeExport(); } catch (e) { flash("Der Abgleich konnte nicht erstellt werden (" + (e?.message || e) + ").", true); return; } if (!x) return;
+    const set = rid(6), chunks = x.sealed.match(new RegExp(`.{1,${MSG_CHUNK}}`, "g")), n = chunks.length, von = S.meta.lehrkraft || "?";
+    const parts = chunks.map((c,i) => `Logbuch ESE – Abgleich von ${von}${n > 1 ? ` (Nachricht ${i+1} von ${n})` : ""}, ${x.count} Einträge.\nEinlesen: Nachricht kopieren → Logbuch-App → Abgleich → „Aus Zwischenablage einlesen“.\n\nLBE1:${set}:${i+1}/${n}:${c}.\n`);
+    S.msg = { parts, sent: parts.map(() => false), count: x.count }; drawMsg(); $("shareArea")?.scrollIntoView({ behavior:"smooth", block:"center" }); return; }
+  if (d.msgShare !== undefined) { const m = S.msg; if (!m) return; const i = +d.msgShare;
+    navigator.share({ text: m.parts[i] })
+      .then(() => { m.sent[i] = true; drawMsg(); })
+      .catch(async e => { if (e && e.name === "AbortError") return; if (await copyPlain(m.parts[i])) { m.sent[i] = true; drawMsg(); flash("Teilen ging nicht – der Text ist stattdessen kopiert. Jetzt im Messenger einfügen."); } else flash("Teilen hat nicht geklappt (" + (e?.name || e) + ").", true); });
     return; }
+  if (d.msgCopy !== undefined) { const m = S.msg; if (!m) return; const i = +d.msgCopy;
+    if (await copyPlain(m.parts[i])) { m.sent[i] = true; drawMsg(); flash(`Kopiert${m.parts.length > 1 ? ` (Nachricht ${i+1} von ${m.parts.length})` : ""}. Jetzt im Messenger oder in der Mail einfügen und senden.`); }
+    else flash("Kopieren hat nicht geklappt.", true); return; }
+  if ("msgDone" in d) { const n = S.msg?.count || 0; S.msg = null; await afterExport(); render(); flash(`Abgleich mit ${n} Einträgen gesendet.`); return; }
+  if ("msgCancel" in d) { S.msg = null; const a = $("shareArea"); if (a) a.innerHTML = ""; return; }
   if ("sendFile" in d) { let x; try { x = await makeExport(); } catch (e) { flash("Die Datei konnte nicht erstellt werden (" + (e?.message || e) + ").", true); return; } if (!x) return;
     const name = `logbuch-abgleich_${(S.meta.lehrkraft||"").replace(/[^A-Za-z0-9]/g,"")}_${new Date().toISOString().slice(0,10)}.txt`;
     const ok = await saveFile(name, x.sealed);
@@ -13106,7 +13139,7 @@ document.addEventListener("change", async ev => {
     } catch (e) { flash(e.message === "kein-lbe" ? "Das ist kein Logbuch-Code." : "Das Foto konnte nicht gelesen werden.", true); }
     return;
   }
-  if (t.id === "fileIn" && t.files[0]) { const txt = await t.files[0].text(); t.value = ""; await tryImport(txt); return; }
+  if (t.id === "fileIn" && t.files[0]) { const txt = await t.files[0].text(); t.value = ""; await importText(txt); return; }
 });
 document.addEventListener("submit", async ev => {
   ev.preventDefault(); const f = ev.target;
