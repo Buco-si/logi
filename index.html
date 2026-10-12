@@ -12838,12 +12838,18 @@ function renderSync(){
     <section class="panel"><h3>Team-Passwort</h3>
       ${pwSet ? `<div class="row"><span class="hint">Auf diesem Gerät gespeichert.</span><button class="btn ghost" data-pw-clear>Passwort entfernen</button></div>`
         : `<form class="row" id="pwForm" autocomplete="off"><div class="field"><label for="pw1">Team-Passwort (mind. 10 Zeichen)</label><input type="password" id="pw1" autocomplete="new-password"></div>
-           <button class="btn" type="submit">Speichern</button></form>`}
+           <div class="field"><label for="pw1b">Passwort wiederholen</label><input type="password" id="pw1b" autocomplete="new-password"></div>
+           <button class="btn" type="submit">Speichern</button></form>
+           <label class="hint" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pwShow"> Passwort anzeigen</label>
+           <div class="hint">Groß- und Kleinschreibung zählt. Auf beiden Geräten muss es exakt gleich sein.</div>`}
     </section>
     <section class="panel"><h3>Senden</h3>
       <div class="row"><div class="field"><label for="sScope">Was senden?</label><select id="sScope">
         <option value="neu">Neu seit meinem letzten Senden${seit ? " (" + new Date(seit).toLocaleDateString("de-DE") + ")" : ""}: ${nNeu} Einträge</option>
+        <option value="7">Letzte 7 Tage: ${buildPayload(new Date(Date.now()-7*864e5).toISOString()).eintraege.length} Einträge</option>
+        <option value="30">Letzte 30 Tage: ${buildPayload(new Date(Date.now()-30*864e5).toISOString()).eintraege.length} Einträge</option>
         <option value="alles">Alles (${S.eintraege.length} Einträge, inkl. Löschungen)</option></select></div></div>
+      <div class="hint">Hat der Empfang beim letzten Mal nicht geklappt? Dann „Letzte 7 Tage“ oder „Alles“ wählen. Doppelte Einträge sind kein Problem.</div>
       <div class="row"><button class="btn primary" data-send-qr ${pwSet ? "" : "disabled"}>QR-Code anzeigen</button>
         <button class="btn" data-send-file ${pwSet ? "" : "disabled"}>Als Datei speichern</button>
         ${navigator.canShare ? `<button class="btn" data-send-share ${pwSet ? "" : "disabled"}>Datei teilen …</button>` : ""}</div>
@@ -12866,7 +12872,9 @@ function renderSync(){
         <textarea id="pasteIn" style="min-height:80px" placeholder="LBE1:…"></textarea></div>
         <div class="row" style="margin-top:8px"><button class="btn" data-paste>Einlesen</button></div></details>
       <div class="hint">Tipp: Am sendenden Handy die Helligkeit hochdrehen. Kamera ruhig und gerade halten, ca. 15–25 cm Abstand, ohne Spiegelungen.</div>
-      ${S.pendingImport ? `<form class="row" id="pwAsk" autocomplete="off"><div class="field"><label for="pw2">Team-Passwort zum Entschlüsseln</label><input type="password" id="pw2"></div><button class="btn primary" type="submit">Einlesen</button></form>` : ""}
+      ${S.pendingImport ? `<form class="row" id="pwAsk" autocomplete="off"><div class="field"><label for="pw2">Team-Passwort des sendenden Geräts</label><input type="password" id="pw2"></div><button class="btn primary" type="submit">Einlesen</button></form>
+        <label class="hint" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pwSave" checked> Dieses Passwort hier als Team-Passwort speichern</label>
+        <label class="hint" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pwShow"> Passwort anzeigen</label>` : ""}
     </section>`;
 }
 
@@ -12893,7 +12901,7 @@ function renderSettings(){
 
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
-const APP_VERSION = "5";
+const APP_VERSION = "6";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -12908,7 +12916,8 @@ function drawQr(){
 }
 async function makeExport(){
   const scope = $("sScope").value;
-  const payload = buildPayload(scope === "neu" ? S.meta.letzterExport : null);
+  const since = scope === "neu" ? S.meta.letzterExport : scope === "alles" ? null : new Date(Date.now() - (+scope)*864e5).toISOString();
+  const payload = buildPayload(since);
   if (!payload.eintraege.length && !payload.kinder.length) { flash("Seit dem letzten Senden gibt es nichts Neues.", true); return null; }
   return { sealed: await seal(payload, S.meta.teampw), count: payload.eintraege.length };
 }
@@ -12994,7 +13003,9 @@ async function doImport(sealed, pw){
     S.pendingImport = null; S.scan = { parts:{}, total:0, set:null };
     flash(`Abgleich von ${p.von || "?"}: ${r.neu} neue, ${r.aktualisiert} geänderte, ${r.geloescht} gelöschte Einträge${r.kinder ? `, ${r.kinder} neue Kinder` : ""}.`);
   } catch (e) {
-    flash(e.message === "passwort" ? "Das Team-Passwort passt nicht zu diesem Abgleich." : e.message === "kompression" ? "Dieses Gerät kann den Abgleich nicht entpacken. Bitte Browser aktualisieren." : "Der Abgleich konnte nicht gelesen werden.", true);
+    if (e.message === "passwort") { S.pendingImport = sealed; render();
+      flash("Das Team-Passwort passt nicht zu diesem Abgleich. Die Codes sind gespeichert – gib unten das Passwort des sendenden Geräts ein.", true); return; }
+    flash(e.message === "kompression" ? "Dieses Gerät kann den Abgleich nicht entpacken. Bitte Browser aktualisieren." : "Der Abgleich konnte nicht gelesen werden.", true);
   }
   render();
 }
@@ -13053,6 +13064,7 @@ document.addEventListener("click", async ev => {
 document.addEventListener("change", async ev => {
   const t = ev.target;
   if (t.dataset.mesk) { const e = S.eintraege.find(x => x.id === t.dataset.mesk); await putMany("eintraege", [{...e, mesk:t.value, geaendert:nowIso()}]); await load(); render(); return; }
+  if (t.id === "pwShow") { for (const id of ["pw1","pw1b","pw2"]) { const el = $(id); if (el) el.type = t.checked ? "text" : "password"; } return; }
   if (t.id === "scanIn" && t.files[0]) {
     try { const txt = await decodeImage(t.files[0]); t.value = "";
       if (!txt) { flash("Kein QR-Code erkannt. Bitte näher und gerade fotografieren.", true); return; }
@@ -13076,8 +13088,11 @@ document.addEventListener("submit", async ev => {
     await putMany("kinder", [{ id, kuerzel:kz, klasse:kl, geloescht:false, angelegt:nowIso(), geaendert:nowIso() }]); await load(); render(); flash(`${kz} angelegt.`); return; }
   if (f.id === "redForm") { await setMeta("redact", $("redact").value); await load(); flash("Gespeichert."); return; }
   if (f.id === "pwForm") { const pw = $("pw1").value; if (pw.length < 10) { flash("Bitte mindestens 10 Zeichen verwenden.", true); return; }
+    if (pw !== $("pw1b").value) { flash("Die beiden Eingaben stimmen nicht überein.", true); return; }
     await setMeta("teampw", pw); await load(); render(); flash("Team-Passwort gespeichert."); return; }
-  if (f.id === "pwAsk") { const pw = $("pw2").value; await doImport(S.pendingImport, pw); return; }
+  if (f.id === "pwAsk") { const pw = $("pw2").value, save = $("pwSave")?.checked; const sealed = S.pendingImport;
+    try { await unseal(sealed, pw); if (save && pw.length >= 10) { await setMeta("teampw", pw); await load(); } } catch(_) {}
+    await doImport(sealed, pw); return; }
 });
 
 async function saveEntry(){
