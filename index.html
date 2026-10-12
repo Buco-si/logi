@@ -62,6 +62,8 @@ textarea{resize:vertical;min-height:92px}
 .meta{font-size:.84rem;color:var(--muted)}
 .strip{display:grid;grid-template-columns:repeat(8,1fr);gap:3px}
 .strip i{height:9px;border-radius:2px;background:var(--sunk);display:block}
+.wk{font-size:.75rem;font-weight:700;padding:1px 8px;border-radius:999px;background:var(--accent-soft);color:var(--ink);white-space:nowrap}
+.edited{font-size:.75rem;color:var(--muted);font-style:italic}
 .legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:.8rem;color:var(--muted)}
 .legend span{display:inline-flex;align-items:center;gap:6px}
 .empty{border:1.5px dashed var(--line);border-radius:var(--r);padding:18px;color:var(--muted);text-align:center;display:grid;gap:10px;justify-items:center}
@@ -12631,13 +12633,14 @@ async function unseal(str, pw){
 /* ================= Zusammenführen ================= */
 async function mergePayload(p){
   if (!p || p.app !== "LBE") throw new Error("format");
-  const res = { neu:0, aktualisiert:0, geloescht:0, kinder:0 };
+  const res = { neu:0, aktualisiert:0, geloescht:0, kinder:0, vorhanden:0, gesamt:(p.eintraege || []).length };
   const kMap = new Map(S.kinder.map(k => [k.id, k])), eMap = new Map(S.eintraege.map(e => [e.id, e]));
   const kPut = [], ePut = [];
   for (const k of p.kinder || []) { const cur = kMap.get(k.id); if (!cur || k.geaendert > cur.geaendert) { kPut.push(k); if (!cur) res.kinder++; } }
   for (const e of p.eintraege || []) { const cur = eMap.get(e.id);
     if (!cur) { ePut.push(e); if (!e.geloescht) res.neu++; }
-    else if (e.geaendert > cur.geaendert) { ePut.push(e); if (e.geloescht && !cur.geloescht) res.geloescht++; else res.aktualisiert++; } }
+    else if (e.geaendert > cur.geaendert) { ePut.push(e); if (e.geloescht && !cur.geloescht) res.geloescht++; else res.aktualisiert++; }
+    else res.vorhanden++; }
   if (kPut.length) await putMany("kinder", kPut);
   if (ePut.length) await putMany("eintraege", ePut);
   await load();
@@ -12764,17 +12767,18 @@ function renderHome(){
   const offen = S.eintraege.filter(e => !e.geloescht && !e.mesk).length;
   const cards = kinder.map(k => {
     const es = eintraegeVon(k.id);
-    const strip = MESK.map(a => { const n = es.filter(e => e.mesk === a.k).length; return `<i class="${n ? "g-"+a.g : ""}" title="${esc(a.s)}: ${n}"></i>`; }).join("");
+    const strip = MESK.map(a => { const n = es.filter(e => e.mesk === a.k).length; return `<i style="${n ? `background:var(--g-${a.g})` : ""}" title="${esc(a.s)}: ${n}"></i>`; }).join("");
+    const woche = es.filter(e => new Date(e.ts) >= weekAgo).length;
     return `<button class="card" data-kind="${esc(k.id)}">
       <div class="t"><span class="kz">${esc(k.kuerzel)} ${k.beispiel ? '<span class="ex">Beispiel</span>' : ""}${k.platzhalter ? '<span class="ex">vorläufig</span>' : ""}</span><span class="meta">${esc(k.klasse||"")}</span></div>
       <div class="strip" aria-label="Einträge je MesK-Bereich">${strip}</div>
-      <div class="meta">${es.length} Einträge${es[0] ? " · zuletzt " + daysAgo(es[0].ts) : ""}</div></button>`; }).join("");
+      <div class="t"><span class="meta">${es.length} Einträge${es[0] ? " · zuletzt " + daysAgo(es[0].ts) : ""}</span>${woche ? `<span class="wk">+${woche} diese Woche</span>` : ""}</div></button>`; }).join("");
   const letzter = S.meta.letzterAbgleich ? `Letzter Abgleich: ${daysAgo(S.meta.letzterAbgleich)}` : "Noch kein Abgleich";
   return `${captureHtml(null)}
     <section class="panel">
       <div class="row" style="justify-content:space-between;align-items:baseline"><h2>Kinder</h2>
         <span class="hint">${S.eintraege.filter(e => !e.geloescht && new Date(e.ts) >= weekAgo).length} Einträge in 7 Tagen · ${offen} ohne Bereich · ${letzter}</span></div>
-      <div class="legend"><span><i class="sw g-selbst"></i>Selbstkompetenz</span><span><i class="sw g-sozial"></i>Sozialkompetenz</span><span><i class="sw g-lern"></i>Lernkompetenz</span></div>
+      <div class="legend"><span><i class="sw g-selbst"></i>Selbstkompetenz</span><span><i class="sw g-sozial"></i>Sozialkompetenz</span><span><i class="sw g-lern"></i>Lernkompetenz</span><span>Streifen auf der Karte = die 8 MesK-Bereiche; farbig = es gibt Einträge</span></div>
       ${kinder.length ? `<div class="cards">${cards}</div>` : `<div class="empty"><span>Noch keine Kinder angelegt.</span><button class="btn" data-demo>Beispieldaten zum Ausprobieren laden</button></div>`}
       <form class="row" id="addKind" autocomplete="off">
         <div class="field"><label for="nKz">Neues Kind (Kürzel)</label><input type="text" id="nKz" maxlength="12" placeholder="z. B. A.M."></div>
@@ -12798,12 +12802,21 @@ function renderKind(){
   const items = sorted.map(e => {
     const m = fmtMonth(e.ts); const mh = m !== lm ? `<div class="month">${esc(m)}</div>` : ""; lm = m;
     const a = area(e.mesk);
+    if (S.edit === e.id) return `${mh}<article class="entry" style="border-left-color:var(--accent)">
+      <form id="editForm" class="field" style="gap:8px" autocomplete="off" data-id="${esc(e.id)}">
+        <div class="row"><div class="field"><label for="eWhen">Zeitpunkt</label><input type="datetime-local" id="eWhen" value="${localInput(new Date(e.ts))}"></div>
+          <div class="field"><label for="eSit">Situation</label><select id="eSit">${SITUATIONEN.map(x => `<option${x===e.situation?" selected":""}>${x}</option>`).join("")}</select></div></div>
+        <div class="field"><label for="eText">Beobachtung</label><textarea id="eText">${esc(e.text)}</textarea></div>
+        <div class="field"><label for="eMesk">MesK-Bereich</label><select id="eMesk">${meskOptions(e.mesk)}</select></div>
+        <div class="row"><button class="btn primary" type="submit">Änderung speichern</button><button class="btn" type="button" data-edit-cancel>Abbrechen</button></div>
+      </form></article>`;
     return `${mh}<article class="entry" style="border-left-color:${a ? `var(--g-${a.g})` : "var(--line)"}">
       <div class="h"><span class="when">${esc(fmtDate(e.ts))} · ${esc(e.von || "")}</span><span class="tag">${esc(e.situation)}</span></div>
       <div class="txt">${esc(e.text)}</div>
+      ${e.bearbeitet ? `<div class="edited">bearbeitet ${esc(new Date(e.bearbeitet).toLocaleDateString("de-DE"))}${e.bearbeitetVon ? " von " + esc(e.bearbeitetVon) : ""}</div>` : ""}
       <div class="f"><select data-mesk="${esc(e.id)}" aria-label="MesK-Bereich">${meskOptions(e.mesk)}</select>
       ${S.confirm === e.id ? `<span class="conf">Löschen? <button class="btn ghost danger" data-del-yes="${esc(e.id)}">Ja, löschen</button><button class="btn ghost" data-del-no>Abbrechen</button></span>`
-                           : `<button class="btn ghost" data-del="${esc(e.id)}">Löschen</button>`}</div></article>`; }).join("");
+                           : `<span><button class="btn ghost" data-edit="${esc(e.id)}">Bearbeiten</button><button class="btn ghost" data-del="${esc(e.id)}">Löschen</button></span>`}</div></article>`; }).join("");
   return `<div><button class="btn ghost" data-home>← Alle Kinder</button></div>
     <section class="panel"><div class="row" style="justify-content:space-between;align-items:baseline">
       <h2>Logbuch ${esc(k.kuerzel)} ${k.beispiel ? '<span class="ex">Beispiel</span>' : ""}</h2><span class="hint">${esc(k.klasse||"")} · ${all.length} Einträge</span></div></section>
@@ -12851,15 +12864,16 @@ function renderSync(){
     </section>
     <section class="panel"><h3>Senden</h3>
       <div class="row"><div class="field"><label for="sScope">Was senden?</label><select id="sScope">
-        <option value="neu">Neu seit meinem letzten Senden${seit ? " (" + new Date(seit).toLocaleDateString("de-DE") + ")" : ""}: ${nNeu} Einträge</option>
+        <option value="30">Letzte 30 Tage: ${buildPayload(new Date(Date.now()-30*864e5).toISOString()).eintraege.length} Einträge (empfohlen)</option>
         <option value="7">Letzte 7 Tage: ${buildPayload(new Date(Date.now()-7*864e5).toISOString()).eintraege.length} Einträge</option>
-        <option value="30">Letzte 30 Tage: ${buildPayload(new Date(Date.now()-30*864e5).toISOString()).eintraege.length} Einträge</option>
-        <option value="alles">Alles (${S.eintraege.length} Einträge, inkl. Löschungen)</option></select></div></div>
-      <div class="hint">Hat der Empfang beim letzten Mal nicht geklappt? Dann „Letzte 7 Tage“ oder „Alles“ wählen. Doppelte Einträge sind kein Problem.</div>
+        <option value="alles">Alles: ${S.eintraege.length} Einträge (inkl. Löschungen)</option>
+        <option value="neu">Nur neu seit meinem letzten Senden${seit ? " (" + new Date(seit).toLocaleDateString("de-DE") + ")" : ""}: ${nNeu} Einträge</option></select></div></div>
+      <div class="hint">Doppelte Einträge sind kein Problem – das andere Gerät übernimmt nur, was ihm fehlt. Bei sehr vielen Einträgen lieber „Als Datei speichern“ nutzen.</div>
       <div class="row"><button class="btn primary" data-send-qr ${pwSet ? "" : "disabled"}>QR-Code anzeigen</button>
         <button class="btn" data-send-file ${pwSet ? "" : "disabled"}>Als Datei speichern</button>
         ${navigator.canShare ? `<button class="btn" data-send-share ${pwSet ? "" : "disabled"}>Datei teilen …</button>` : ""}</div>
       ${pwSet ? "" : `<div class="hint">Zuerst das Team-Passwort festlegen.</div>`}
+      <div id="shareArea"></div>
       <div id="qrArea"></div>
     </section>
     <section class="panel"><h3>Empfangen</h3>
@@ -12868,7 +12882,7 @@ function renderSync(){
         <label class="btn" for="scanIn" style="display:inline-block">QR-Code fotografieren</label>
         <input type="file" id="scanIn" accept="image/*" capture="environment" hidden>
         <label class="btn" for="fileIn" style="display:inline-block">Datei öffnen</label>
-        <input type="file" id="fileIn" accept=".lbe,text/plain" hidden>
+        <input type="file" id="fileIn" accept=".lbe,.txt,text/plain" hidden>
         ${sc.total ? `<button class="btn ghost" data-scan-reset>Neu beginnen</button>` : ""}
       </div>
       ${prog}
@@ -12907,13 +12921,13 @@ function renderSettings(){
 
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
-const APP_VERSION = "7";
+const APP_VERSION = "10";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
   const q = qrcode(0, "M"); q.addData(text, "Byte"); q.make();
   const n = q.getModuleCount(), scale = 6, margin = 4, size = (n + margin*2) * scale;
-  area_.innerHTML = `<div class="qrbox"><span class="cap">Code ${idx+1} von ${parts.length}</span><canvas id="qrc" width="${size}" height="${size}" aria-label="QR-Code ${idx+1} von ${parts.length}"></canvas>
+  area_.innerHTML = `<div class="qrbox"><span class="cap">Code ${idx+1} von ${parts.length} · ${S.qr.count} Einträge</span><canvas id="qrc" width="${size}" height="${size}" aria-label="QR-Code ${idx+1} von ${parts.length}"></canvas>
     ${parts.length > 1 ? `<div class="row" style="justify-content:center"><button class="btn ${S.qr.auto ? "primary" : ""}" data-qr-auto>${S.qr.auto ? "Automatik läuft – anhalten" : "Automatisch durchblättern"}</button></div>
       <span class="cap" style="font-weight:400;font-size:.8rem">Für den Live-Scan: Automatik starten, das andere Handy liest alle Codes von selbst.</span>` : ""}
     <div class="row" style="justify-content:center">${idx > 0 ? `<button class="btn" data-qr-prev>Zurück</button>` : ""}${idx < parts.length-1 ? `<button class="btn primary" data-qr-next>Nächster Code</button>` : ""}<button class="btn" data-qr-done>Fertig</button></div></div>`;
@@ -13007,7 +13021,7 @@ async function doImport(sealed, pw){
     const r = await mergePayload(p);
     await setMeta("letzterAbgleich", nowIso()); await load();
     S.pendingImport = null; S.scan = { parts:{}, total:0, set:null };
-    flash(`Abgleich von ${p.von || "?"}: ${r.neu} neue, ${r.aktualisiert} geänderte, ${r.geloescht} gelöschte Einträge${r.kinder ? `, ${r.kinder} neue Kinder` : ""}.`);
+    flash(`Abgleich von ${p.von || "?"} mit ${r.gesamt} Einträgen: ${r.neu} neu übernommen, ${r.aktualisiert} aktualisiert, ${r.geloescht} gelöscht, ${r.vorhanden} waren schon vorhanden${r.kinder ? `; ${r.kinder} neue Kinder` : ""}.`);
   } catch (e) {
     if (e.message === "passwort") { S.pendingImport = sealed; render();
       flash("Das Team-Passwort passt nicht zu diesem Abgleich. Die Codes sind gespeichert – gib unten das Passwort des sendenden Geräts ein.", true); return; }
@@ -13020,11 +13034,13 @@ async function doImport(sealed, pw){
 document.addEventListener("click", async ev => {
   const b = ev.target.closest("button"); if (!b) return; const d = b.dataset;
   if (d.nav) { S.view = d.nav; S.confirm = null; stopAuto(); stopLive(); S.qr = null; render(); window.scrollTo({top:0}); return; }
-  if (d.kind) { S.view = "kind"; S.kindId = d.kind; S.filter = "all"; S.confirm = null; render(); window.scrollTo({top:0}); return; }
+  if (d.kind) { S.view = "kind"; S.kindId = d.kind; S.filter = "all"; S.confirm = null; S.edit = null; render(); window.scrollTo({top:0}); return; }
   if ("home" in d) { S.view = "home"; render(); return; }
   if (d.filter) { S.filter = d.filter; render(); return; }
   if ("sort" in d) { S.asc = !S.asc; render(); return; }
   if (b.id === "cSave") return saveEntry();
+  if (d.edit) { S.edit = d.edit; S.confirm = null; render(); $("eText")?.focus(); return; }
+  if ("editCancel" in d) { S.edit = null; render(); return; }
   if (d.del) { S.confirm = d.del; render(); return; }
   if ("delNo" in d) { S.confirm = null; render(); return; }
   if (d.delYes) { const e = S.eintraege.find(x => x.id === d.delYes); await putMany("eintraege", [{...e, text:"", geloescht:true, geaendert:nowIso()}]); await load(); S.confirm = null; render(); return; }
@@ -13055,10 +13071,20 @@ document.addEventListener("click", async ev => {
     return; }
   if ("scanStop" in d) { stopLive(); render(); return; }
   if ("qrDone" in d) { stopAuto(); try { S.wake?.release(); } catch(_) {} const n = S.qr.count; await afterExport(); S.qr = null; render(); flash(`Abgleich mit ${n} Einträgen gesendet. Beim nächsten Mal werden nur neue Einträge übertragen.`); return; }
-  if ("sendFile" in d || "sendShare" in d) { let x; try { x = await makeExport(); } catch (e) { flash("Die Datei konnte nicht erstellt werden (" + (e?.message || e) + ").", true); return; } if (!x) return;
-    const name = `logbuch-abgleich_${(S.meta.lehrkraft||"").replace(/[^A-Za-z0-9]/g,"")}_${new Date().toISOString().slice(0,10)}.lbe`;
-    const ok = "sendShare" in d ? await shareFile(name, x.sealed) : await saveFile(name, x.sealed);
-    if (ok) { await afterExport(); render(); flash(`Abgleich-Datei mit ${x.count} Einträgen erstellt.`); } return; }
+  if ("sendShare" in d) { let x; try { x = await makeExport(); } catch (e) { flash("Die Datei konnte nicht erstellt werden (" + (e?.message || e) + ").", true); return; } if (!x) return;
+    S.prepared = { name:`logbuch-abgleich_${(S.meta.lehrkraft||"").replace(/[^A-Za-z0-9]/g,"")}_${new Date().toISOString().slice(0,10)}.txt`, data:x.sealed, count:x.count };
+    $("shareArea").innerHTML = `<div class="msg">Datei mit ${x.count} Einträgen ist vorbereitet. <button class="btn primary" data-share-now>Jetzt teilen</button></div>`; return; }
+  if ("shareNow" in d) { const p = S.prepared; if (!p) return;
+    let file; try { file = new File([p.data], p.name, { type:"text/plain" }); } catch(_) {}
+    if (!file || !navigator.canShare || !navigator.canShare({ files:[file] })) { flash("Dieses Gerät kann die Datei nicht teilen. Bitte „Als Datei speichern“ nutzen.", true); return; }
+    navigator.share({ files:[file], title:"Logbuch-Abgleich" })
+      .then(async () => { S.prepared = null; await afterExport(); render(); flash(`Abgleich-Datei mit ${p.count} Einträgen geteilt.`); })
+      .catch(e => { if (e && e.name === "AbortError") flash("Teilen abgebrochen."); else flash("Teilen hat nicht geklappt (" + (e?.name || e) + "). Bitte „Als Datei speichern“ nutzen.", true); });
+    return; }
+  if ("sendFile" in d) { let x; try { x = await makeExport(); } catch (e) { flash("Die Datei konnte nicht erstellt werden (" + (e?.message || e) + ").", true); return; } if (!x) return;
+    const name = `logbuch-abgleich_${(S.meta.lehrkraft||"").replace(/[^A-Za-z0-9]/g,"")}_${new Date().toISOString().slice(0,10)}.txt`;
+    const ok = await saveFile(name, x.sealed);
+    if (ok) { await afterExport(); render(); flash(`Abgleich-Datei mit ${x.count} Einträgen gespeichert (Ordner „Downloads“).`); } return; }
   if ("anon" in d) { const k = S.kinder.find(x => x.id === S.kindId); const txt = buildAnon(k, $("aAuftrag").value, false);
     $("anonOut").innerHTML = txt ? `<div class="warnbox">Bitte vor dem Kopieren lesen: Stehen noch Namen, Orte, Daten oder auffällige Einzelheiten drin? Dann direkt im Feld ändern.</div>
       <textarea id="aText" aria-label="Anonymisierter Text">${esc(txt)}</textarea><div class="row"><button class="btn primary" data-anon-copy>Text kopieren</button><span class="hint">Danach in den Chat mit Claude einfügen.</span></div>`
@@ -13092,6 +13118,11 @@ document.addEventListener("submit", async ev => {
     const cur = S.kinder.find(k => k.id === id);
     if (cur && !cur.geloescht) { flash("Dieses Kürzel gibt es schon.", true); return; }
     await putMany("kinder", [{ id, kuerzel:kz, klasse:kl, geloescht:false, angelegt:nowIso(), geaendert:nowIso() }]); await load(); render(); flash(`${kz} angelegt.`); return; }
+  if (f.id === "editForm") { const e = S.eintraege.find(x => x.id === f.dataset.id); const text = $("eText").value.trim();
+    if (!text) { flash("Der Text darf nicht leer sein.", true); return; }
+    const when = $("eWhen").value ? new Date($("eWhen").value).toISOString() : e.ts;
+    await putMany("eintraege", [{ ...e, text, situation:$("eSit").value, mesk:$("eMesk").value, ts:when, geaendert:nowIso(), bearbeitet:nowIso(), bearbeitetVon:S.meta.lehrkraft || "" }]);
+    await load(); S.edit = null; render(); flash("Änderung gespeichert. Sie wird beim nächsten Abgleich übertragen."); return; }
   if (f.id === "redForm") { await setMeta("redact", $("redact").value); await load(); flash("Gespeichert."); return; }
   if (f.id === "pwForm") { const pw = $("pw1").value; if (pw.length < 10) { flash("Bitte mindestens 10 Zeichen verwenden.", true); return; }
     if (pw !== $("pw1b").value) { flash("Die beiden Eingaben stimmen nicht überein.", true); return; }
