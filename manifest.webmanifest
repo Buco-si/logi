@@ -1,0 +1,12 @@
+{
+  "name": "Logbuch ESE",
+  "short_name": "Logbuch",
+  "description": "Beobachtungen nach MesK-Bereichen erfassen – Daten bleiben auf dem Gerät.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef2f1",
+  "theme_color": "#1d6b58",
+  "lang": "de",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
