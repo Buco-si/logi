@@ -13152,6 +13152,10 @@ function renderSettings(){
       <li>Die MesK-Vorschläge entstehen über eine Schlüsselwortliste im Gerät, ohne KI und ohne Internet.</li>
       <li>Bitte nur Kürzel verwenden, keine Diagnosen oder Familiendetails.</li></ul></section>
     <p class="hint" style="margin:0;text-align:center">Logbuch ESE · Version ${APP_VERSION}</p>
+    <section class="panel danger-zone"><h3>Alle Einträge löschen</h3>
+      <p class="hint" style="margin:0 0 8px">Löscht alle Beobachtungen. Kinder, Kürzel, Rufnamen, Team-Passwort und PIN bleiben erhalten. Die Löschung wird beim nächsten Abgleich an die Kolleg:innen weitergegeben.</p>
+      ${S.confirm === "entries" ? `<div class="conf">Wirklich alle ${S.eintraege.filter(e => !e.geloescht).length} Einträge löschen? ${S.meta.teampw ? `<button class="btn" data-backup>Vorher sichern</button>` : ""}<button class="btn danger" data-wipe-entries-yes>Alle Einträge löschen</button><button class="btn" data-del-no>Abbrechen</button></div>`
+        : `<div><button class="btn danger" data-wipe-entries ${S.eintraege.some(e => !e.geloescht) ? "" : "disabled"}>Alle Einträge löschen …</button></div>`}</section>
     <section class="panel danger-zone"><h3>Alles löschen</h3>
       ${S.confirm === "all" ? `<div class="conf">Alle Kinder und Einträge auf diesem Gerät löschen? ${S.meta.teampw ? `<button class="btn" data-backup>Vorher sichern</button>` : ""}<button class="btn danger" data-wipe-yes>Alles löschen</button><button class="btn" data-del-no>Abbrechen</button></div>`
         : `<div><button class="btn danger" data-wipe>Alle Daten auf diesem Gerät löschen …</button></div>`}
@@ -13161,7 +13165,7 @@ function renderSettings(){
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
 const MSG_CHUNK = 2800;
-const APP_VERSION = "16";
+const APP_VERSION = "17";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -13343,6 +13347,10 @@ document.addEventListener("click", async ev => {
     await putMany("eintraege", S.eintraege.filter(e => e.kindId === k.id && !e.geloescht).map(e => ({...e, text:"", geloescht:true, geaendert:t})));
     await putMany("kinder", [{...k, klasse:"", geloescht:true, geaendert:t}]); await load(); S.confirm = null; S.view = "home"; render(); flash(`${k.kuerzel} wurde gelöscht.`); return; }
   if ("wipe" in d) { S.confirm = "all"; render(); return; }
+  if ("wipeEntries" in d) { S.confirm = "entries"; render(); return; }
+  if ("wipeEntriesYes" in d) { const t = nowIso(); const list = S.eintraege.filter(e => !e.geloescht);
+    await putMany("eintraege", list.map(e => ({ ...e, text:"", geloescht:true, geaendert:t }))); await load(); S.confirm = null; render();
+    flash(`${list.length} Einträge gelöscht. Damit sie auch bei der Kollegin verschwinden: Abgleich → „Alles“ → „Als Nachricht senden“.`); return; }
   if ("wipeYes" in d) { await tx("kinder","readwrite",s => s.clear()); await tx("eintraege","readwrite",s => s.clear());
     await tx("meta","readwrite",s => s.clear()); LOCK.key = null; LOCK.hkey = null; S.meta = {}; await load(); S.confirm = null; S.view = "home"; render(); flash("Alle Daten auf diesem Gerät wurden gelöscht."); return; }
   if ("demo" in d) return loadDemo();
