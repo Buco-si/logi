@@ -12813,6 +12813,26 @@ const AUFTRAEGE = {
   verlauf: "Bitte fasse die Entwicklung im Beobachtungszeitraum in einem kurzen, sachlichen Bericht zusammen (z. B. für ein Elterngespräch oder die Fortschreibung des Förderplans). Erst Stärken, dann Entwicklungsfelder."
 };
 const reEsc = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/* Rufnamen: Kind beim Diktieren erkennen; beim Speichern wird der Name durch das Kürzel ersetzt */
+const rufnamen = k => String(k.rufname || "").split(/[,;\/]/).map(x => x.trim()).filter(x => x.length >= 2);
+const nameRegex = n => new RegExp("(?<![\\p{L}])" + reEsc(n) + "(s)?(?![\\p{L}])", "giu");
+function detectKind(text){
+  const t = String(text || ""); let best = null, tie = false;
+  for (const k of aktiveKinder()) {
+    const pats = rufnamen(k).map(nameRegex); const kr = kuerzelRegex(k.kuerzel); if (kr) pats.push(new RegExp(kr.source, "g"));
+    for (const r of pats) { r.lastIndex = 0; const m = r.exec(t); if (!m) continue;
+      if (!best || m.index < best.pos) { best = { kind:k, pos:m.index, name:m[0] }; tie = false; }
+      else if (m.index === best.pos && best.kind.id !== k.id) tie = true; }
+  }
+  return best && !tie ? best : (tie ? { tie:true, name:best.name } : null);
+}
+function namesToKuerzel(text){
+  let t = String(text || "");
+  const pairs = aktiveKinder().flatMap(k => rufnamen(k).map(n => [n, k.kuerzel])).sort((a,b) => b[0].length - a[0].length);
+  for (const [n, kz] of pairs) t = t.replace(nameRegex(n), (m, s) => kz + (s ? "s" : ""));
+  return t;
+}
+function stripNames(text){ let t = String(text || ""); for (const k of aktiveKinder()) for (const n of rufnamen(k)) t = t.replace(nameRegex(n), " "); return t; }
 function kuerzelRegex(kz){
   const letters = (kz.match(/[A-Za-zÄÖÜäöü]/g) || []);
   if (!letters.length) return null;
@@ -12822,6 +12842,7 @@ function kuerzelRegex(kz){
 }
 function anonymize(text, kind){
   let t = String(text);
+  for (const k of S.kinder) for (const n of rufnamen(k)) t = t.replace(nameRegex(n), k.id === kind.id ? "das Kind" : "ein anderes Kind");
   const own = kuerzelRegex(kind.kuerzel);
   const others = S.kinder.filter(k => k.id !== kind.id).map(k => kuerzelRegex(k.kuerzel)).filter(Boolean);
   for (const r of others) t = t.replace(r, "ein anderes Kind");
@@ -12887,7 +12908,7 @@ function renderSetup(){
 
 function captureHtml(fixedKind){
   const kinder = aktiveKinder();
-  const opts = kinder.map(k => `<option value="${esc(k.id)}"${k.id===fixedKind?" selected":""}>${esc(k.kuerzel)}${k.klasse?" · "+esc(k.klasse):""}</option>`).join("");
+  const opts = kinder.map(k => `<option value="${esc(k.id)}"${k.id===fixedKind?" selected":""}>${esc(k.kuerzel)}${rufnamen(k).length?" ("+esc(rufnamen(k)[0])+")":""}${k.klasse?" · "+esc(k.klasse):""}</option>`).join("");
   return `<section class="panel" aria-labelledby="capH"><h2 id="capH">Neue Beobachtung</h2>
     ${kinder.length ? "" : `<div class="hint">Lege zuerst unten ein Kind an.</div>`}
     <div class="row">
@@ -12896,7 +12917,7 @@ function captureHtml(fixedKind){
       <div class="field"><label for="cWhen">Zeitpunkt</label><input type="datetime-local" id="cWhen"></div>
     </div>
     <div class="field"><label for="cText">Beobachtung</label>
-      <textarea id="cText" placeholder="Tippen oder über das Mikrofon der Tastatur diktieren, z. B.: Hat in der Ankommenszeit von sich aus ein Kind gefragt, ob sie zusammen malen."></textarea></div>
+      <textarea id="cText" placeholder="Tippen oder über das Mikrofon der Tastatur diktieren, z. B.: Ali hat in der Ankommenszeit von sich aus ein anderes Kind gefragt, ob sie zusammen malen. Mit Rufname wird das Kind automatisch erkannt."></textarea></div>
     <div class="row">
       <div class="field" style="flex:2 1 260px"><label for="cMesk">MesK-Bereich</label><select id="cMesk">${meskOptions("")}</select></div>
       <button class="btn primary" id="cSave" ${kinder.length?"":"disabled"}>Speichern</button>
@@ -12907,19 +12928,25 @@ function captureHtml(fixedKind){
 function initCapture(){
   if (!$("cText")) return;
   $("cWhen").value = localInput(new Date());
-  S.manualMesk = false;
+  S.manualMesk = false; S.manualKind = false;
+  $("cKind").addEventListener("change", () => { S.manualKind = true; updateSuggestion(); });
   let t;
   $("cText").addEventListener("input", () => { clearTimeout(t); t = setTimeout(updateSuggestion, 250); });
   $("cMesk").addEventListener("change", () => { S.manualMesk = true; });
 }
 function updateSuggestion(){
   if (!$("cText") || !$("cSuggest")) return;
-  const s = suggestMesk($("cText").value);
-  const box = $("cSuggest");
-  if (!s) { box.innerHTML = $("cText").value.trim() ? "Kein Vorschlag erkannt. Bitte Bereich selbst wählen." : ""; if (!S.manualMesk) $("cMesk").value = ""; return; }
+  const raw = $("cText").value, box = $("cSuggest");
+  let kindLine = "";
+  const d = detectKind(raw);
+  if (d && d.tie) kindLine = `<div>Der Name „${esc(d.name)}“ passt zu mehreren Kindern – bitte oben das Kind wählen.</div>`;
+  else if (d) { if (!S.manualKind && $("cKind").value !== d.kind.id) $("cKind").value = d.kind.id;
+    kindLine = $("cKind").value === d.kind.id ? `<div>Kind erkannt: <b>${esc(d.kind.kuerzel)}</b> <span>(„${esc(d.name)}“)</span></div>` : `<div>Im Text steht zuerst „${esc(d.name)}“ (${esc(d.kind.kuerzel)}) – du hast ein anderes Kind gewählt.</div>`; }
+  const s = suggestMesk(stripNames(raw));
+  if (!s) { box.innerHTML = kindLine + (raw.trim() ? "<div>Kein MesK-Vorschlag erkannt. Bitte Bereich selbst wählen.</div>" : ""); if (!S.manualMesk) $("cMesk").value = ""; return; }
   if (!S.manualMesk) $("cMesk").value = s.k;
   const a = area(s.k);
-  box.innerHTML = `<i class="sw g-${a.g}"></i>Vorschlag: <b>${esc(a.s)}</b> <span>(erkannt: ${esc(s.hits.slice(0,3).join(", "))})</span>`;
+  box.innerHTML = kindLine + `<div><i class="sw g-${a.g}"></i>Vorschlag: <b>${esc(a.s)}</b> <span>(erkannt: ${esc(s.hits.slice(0,3).join(", "))})</span></div>`;
 }
 
 function renderHome(){
@@ -12931,7 +12958,7 @@ function renderHome(){
     const strip = MESK.map(a => { const n = es.filter(e => e.mesk === a.k).length; return `<i style="${n ? `background:var(--g-${a.g})` : ""}" title="${esc(a.s)}: ${n}"></i>`; }).join("");
     const woche = es.filter(e => new Date(e.ts) >= weekAgo).length;
     return `<button class="card" data-kind="${esc(k.id)}">
-      <div class="t"><span class="kz">${esc(k.kuerzel)} ${k.beispiel ? '<span class="ex">Beispiel</span>' : ""}${k.platzhalter ? '<span class="ex">vorläufig</span>' : ""}</span><span class="meta">${esc(k.klasse||"")}</span></div>
+      <div class="t"><span class="kz">${esc(k.kuerzel)} ${k.beispiel ? '<span class="ex">Beispiel</span>' : ""}${k.platzhalter ? '<span class="ex">vorläufig</span>' : ""}</span><span class="meta">${esc([rufnamen(k)[0], k.klasse].filter(Boolean).join(" · "))}</span></div>
       <div class="strip" aria-label="Einträge je MesK-Bereich">${strip}</div>
       <div class="t"><span class="meta">${es.length} Einträge${es[0] ? " · zuletzt " + daysAgo(es[0].ts) : ""}</span>${woche ? `<span class="wk">+${woche} diese Woche</span>` : ""}</div></button>`; }).join("");
   const letzter = S.meta.letzterAbgleich ? `Letzter Abgleich: ${daysAgo(S.meta.letzterAbgleich)}` : "Noch kein Abgleich";
@@ -12947,10 +12974,11 @@ function renderHome(){
       ${backupHint}${kinder.length ? `<div class="cards">${cards}</div>` : `<div class="empty"><span>Noch keine Kinder angelegt.</span><button class="btn" data-demo>Beispieldaten zum Ausprobieren laden</button></div>`}
       <form class="row" id="addKind" autocomplete="off">
         <div class="field"><label for="nKz">Neues Kind (Kürzel)</label><input type="text" id="nKz" maxlength="12" placeholder="z. B. A.M."></div>
+        <div class="field"><label for="nRn">Rufname(n)</label><input type="text" id="nRn" maxlength="60" placeholder="z. B. Ali, Alessandro"></div>
         <div class="field"><label for="nKl">Klasse</label><input type="text" id="nKl" maxlength="12" placeholder="z. B. 5b"></div>
         <button class="btn" type="submit">Anlegen</button>
       </form>
-      <p class="hint" style="margin:0">Wichtig für den Abgleich: Verwendet im Team für dasselbe Kind genau dasselbe Kürzel.</p>
+      <p class="hint" style="margin:0">Wichtig für den Abgleich: Verwendet im Team für dasselbe Kind genau dasselbe Kürzel. Mit Rufname erkennt die App das Kind beim Diktieren; im gespeicherten Eintrag steht dann das Kürzel.</p>
     </section>`;
 }
 
@@ -12984,7 +13012,12 @@ function renderKind(){
                            : `<span><button class="btn ghost" data-edit="${esc(e.id)}">Bearbeiten</button><button class="btn ghost" data-del="${esc(e.id)}">Löschen</button></span>`}</div></article>`; }).join("");
   return `<div><button class="btn ghost" data-home>← Alle Kinder</button></div>
     <section class="panel"><div class="row" style="justify-content:space-between;align-items:baseline">
-      <h2>Logbuch ${esc(k.kuerzel)} ${k.beispiel ? '<span class="ex">Beispiel</span>' : ""}</h2><span class="hint">${esc(k.klasse||"")} · ${all.length} Einträge</span></div></section>
+      <h2>Logbuch ${esc(k.kuerzel)} ${k.beispiel ? '<span class="ex">Beispiel</span>' : ""}</h2><span class="hint">${esc([rufnamen(k).join(", "), k.klasse].filter(Boolean).join(" · "))} · ${all.length} Einträge</span></div>
+      ${S.kEdit ? `<form id="kEditForm" class="row" autocomplete="off" style="margin-top:8px">
+          <div class="field"><label for="kRn">Rufname(n), mit Komma getrennt</label><input type="text" id="kRn" maxlength="60" value="${esc(k.rufname||"")}" placeholder="z. B. Ali, Alessandro"></div>
+          <div class="field"><label for="kKl">Klasse</label><input type="text" id="kKl" maxlength="12" value="${esc(k.klasse||"")}"></div>
+          <button class="btn primary" type="submit">Speichern</button><button class="btn ghost" type="button" data-kedit-off>Abbrechen</button></form>`
+        : `<div><button class="btn ghost" data-kedit>Rufname / Klasse ändern</button></div>`}</section>
     ${captureHtml(k.id)}
     <section class="panel"><div class="row" style="justify-content:space-between;align-items:center"><h3>Verlauf</h3>
       <button class="btn ghost" data-sort>${S.asc ? "Älteste zuerst" : "Neueste zuerst"} ⇅</button></div>
@@ -13113,7 +13146,7 @@ function renderSettings(){
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
 const MSG_CHUNK = 2800;
-const APP_VERSION = "14";
+const APP_VERSION = "15";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -13273,7 +13306,7 @@ async function doImport(sealed, pw){
 document.addEventListener("click", async ev => {
   const b = ev.target.closest("button"); if (!b) return; const d = b.dataset;
   if (d.nav) { S.view = d.nav; S.confirm = null; stopAuto(); stopLive(); S.qr = null; S.msg = null; render(); window.scrollTo({top:0}); return; }
-  if (d.kind) { S.view = "kind"; S.kindId = d.kind; S.filter = "all"; S.confirm = null; S.edit = null; render(); window.scrollTo({top:0}); return; }
+  if (d.kind) { S.kEdit = false; S.view = "kind"; S.kindId = d.kind; S.filter = "all"; S.confirm = null; S.edit = null; render(); window.scrollTo({top:0}); return; }
   if ("home" in d) { S.view = "home"; render(); return; }
   if (d.filter) { S.filter = d.filter; render(); return; }
   if ("sort" in d) { S.asc = !S.asc; render(); return; }
@@ -13284,6 +13317,8 @@ document.addEventListener("click", async ev => {
   if ("delNo" in d && S.locked) { S.confirm = null; render(); return; }
   if ("delNo" in d) { S.confirm = null; render(); return; }
   if (d.delYes) { const e = S.eintraege.find(x => x.id === d.delYes); await putMany("eintraege", [{...e, text:"", geloescht:true, geaendert:nowIso()}]); await load(); S.confirm = null; render(); return; }
+  if ("kedit" in d) { S.kEdit = true; render(); $("kRn")?.focus(); return; }
+  if ("keditOff" in d) { S.kEdit = false; render(); return; }
   if ("kdel" in d) { S.confirm = "kind"; render(); return; }
   if ("kdelYes" in d) { const k = S.kinder.find(x => x.id === S.kindId); const t = nowIso();
     await putMany("eintraege", S.eintraege.filter(e => e.kindId === k.id && !e.geloescht).map(e => ({...e, text:"", geloescht:true, geaendert:t})));
@@ -13398,11 +13433,14 @@ document.addEventListener("submit", async ev => {
     const id = normKz(kz); if (!id) { flash("Das Kürzel braucht Buchstaben oder Ziffern.", true); return; }
     const cur = S.kinder.find(k => k.id === id);
     if (cur && !cur.geloescht) { flash("Dieses Kürzel gibt es schon.", true); return; }
-    await putMany("kinder", [{ id, kuerzel:kz, klasse:kl, geloescht:false, angelegt:nowIso(), geaendert:nowIso() }]); await load(); render(); flash(`${kz} angelegt.`); return; }
+    await putMany("kinder", [{ id, kuerzel:kz, klasse:kl, rufname:($("nRn")?.value || "").trim(), geloescht:false, angelegt:nowIso(), geaendert:nowIso() }]); await load(); render(); flash(`${kz} angelegt.`); return; }
+  if (f.id === "kEditForm") { const k = S.kinder.find(x => x.id === S.kindId);
+    await putMany("kinder", [{ ...k, rufname:$("kRn").value.trim(), klasse:$("kKl").value.trim(), platzhalter:false, geaendert:nowIso() }]);
+    await load(); S.kEdit = false; render(); flash("Gespeichert. Der Rufname wird beim nächsten Abgleich mit übertragen."); return; }
   if (f.id === "editForm") { const e = S.eintraege.find(x => x.id === f.dataset.id); const text = $("eText").value.trim();
     if (!text) { flash("Der Text darf nicht leer sein.", true); return; }
     const when = $("eWhen").value ? new Date($("eWhen").value).toISOString() : e.ts;
-    await putMany("eintraege", [{ ...e, text, situation:$("eSit").value, mesk:$("eMesk").value, ts:when, geaendert:nowIso(), bearbeitet:nowIso(), bearbeitetVon:S.meta.lehrkraft || "" }]);
+    await putMany("eintraege", [{ ...e, text:namesToKuerzel(text), situation:$("eSit").value, mesk:$("eMesk").value, ts:when, geaendert:nowIso(), bearbeitet:nowIso(), bearbeitetVon:S.meta.lehrkraft || "" }]);
     await load(); S.edit = null; render(); flash("Änderung gespeichert. Sie wird beim nächsten Abgleich übertragen."); return; }
   if (f.id === "redForm") { await setMeta("redact", $("redact").value); await load(); flash("Gespeichert."); return; }
   if (f.id === "pwForm") { const pw = $("pw1").value; if (pw.length < 10) { flash("Bitte mindestens 10 Zeichen verwenden.", true); return; }
@@ -13414,7 +13452,7 @@ document.addEventListener("submit", async ev => {
 });
 
 async function saveEntry(){
-  const kindId = $("cKind").value, text = $("cText").value.trim();
+  const kindId = $("cKind").value, text = namesToKuerzel($("cText").value.trim());
   if (!kindId) { flash("Bitte ein Kind wählen.", true); return; }
   if (!text) { flash("Bitte eine Beobachtung eingeben.", true); return; }
   const when = $("cWhen").value ? new Date($("cWhen").value) : new Date();
