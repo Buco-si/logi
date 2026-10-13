@@ -103,6 +103,7 @@ textarea{resize:vertical;min-height:92px}
       <button data-nav="home" aria-current="page">Erfassen</button>
       <button data-nav="sync">Abgleich</button>
       <button data-nav="settings">Einstellungen</button>
+      <button data-lock-now hidden title="App sperren" aria-label="App sperren">🔒</button>
     </nav>
   </header>
   <div id="flash" class="msg" hidden role="status"></div>
@@ -12575,14 +12576,162 @@ function tx(store, mode, fn){
     t.oncomplete = () => res(out); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
   });
 }
-const getAll = store => tx(store, "readonly", s => new Promise(r => { const q = s.getAll(); q.onsuccess = () => r(q.result); }));
-const putMany = (store, items) => tx(store, "readwrite", s => { for (const i of items) s.put(i); });
+const getAllRaw = store => tx(store, "readonly", s => new Promise(r => { const q = s.getAll(); q.onsuccess = () => r(q.result); }));
+const putManyRaw = (store, items) => tx(store, "readwrite", s => { for (const i of items) s.put(i); });
+
+/* ================= App-Sperre: Verschlüsselung der Daten auf dem Gerät =================
+   Mit eingeschalteter PIN liegen Kinder, Einträge, Team-Passwort und Namensliste nur
+   AES-256-verschlüsselt in der Datenbank. Der Schlüssel entsteht aus der PIN und existiert
+   nur im Arbeitsspeicher, solange die App entsperrt ist. */
+const LOCK = { key:null, hkey:null };
+const SECRET_META = new Set(["teampw", "redact"]);
+const LOCK_ITER = 600000;
+async function deriveLock(pin, salt){
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pin), "PBKDF2", false, ["deriveBits"]);
+  const bits = new Uint8Array(await crypto.subtle.deriveBits({ name:"PBKDF2", salt, iterations:LOCK_ITER, hash:"SHA-256" }, base, 512));
+  return { key: await crypto.subtle.importKey("raw", bits.slice(0,32), { name:"AES-GCM" }, false, ["encrypt","decrypt"]),
+           hkey: await crypto.subtle.importKey("raw", bits.slice(32), { name:"HMAC", hash:"SHA-256" }, false, ["sign"]) };
+}
+async function encWith(keys, obj){
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name:"AES-GCM", iv }, keys.key, new TextEncoder().encode(JSON.stringify(obj))));
+  const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12); return B64.enc(out);
+}
+async function decWith(keys, str){
+  const u = B64.dec(str);
+  return JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name:"AES-GCM", iv:u.slice(0,12) }, keys.key, u.slice(12))));
+}
+async function sidWith(keys, id){ return "x" + B64.enc(new Uint8Array(await crypto.subtle.sign("HMAC", keys.hkey, new TextEncoder().encode(String(id)))).slice(0,18)); }
+async function sealRecords(keys, store, items){
+  return Promise.all(items.map(async i => store === "meta"
+    ? (SECRET_META.has(i.k) ? { k:i.k, enc: await encWith(keys, i.v) } : i)
+    : { id: await sidWith(keys, i.id), enc: await encWith(keys, i) }));
+}
+async function getAll(store){
+  const raw = await getAllRaw(store);
+  if (!raw.some(r => r.enc)) return raw;
+  const out = [];
+  for (const r of raw) {
+    if (!r.enc) { out.push(r); continue; }
+    if (!LOCK.key) continue;
+    try { const v = await decWith(LOCK, r.enc); out.push(store === "meta" ? { k:r.k, v } : v); } catch(_) {}
+  }
+  return out;
+}
+async function putMany(store, items){
+  if (!LOCK.key && S.meta.lock) throw new Error("gesperrt");
+  if (LOCK.key) items = await sealRecords(LOCK, store, items);
+  return putManyRaw(store, items);
+}
+async function rewriteAll(keys){ // alle Daten neu schreiben – verschlüsselt (keys) oder im Klartext (null)
+  const kinder = await getAll("kinder"), eintraege = await getAll("eintraege"), meta = await getAll("meta");
+  const metaOut = meta.filter(m => m.k !== "lock");
+  const K = keys ? await sealRecords(keys, "kinder", kinder) : kinder;
+  const E = keys ? await sealRecords(keys, "eintraege", eintraege) : eintraege;
+  const M = keys ? await sealRecords(keys, "meta", metaOut) : metaOut;
+  return { K, E, M };
+}
+function commitAll({ K, E, M }, lockMeta){
+  return new Promise((res, rej) => {
+    const t = DB.db.transaction(["kinder","eintraege","meta"], "readwrite");
+    const k = t.objectStore("kinder"), e = t.objectStore("eintraege"), m = t.objectStore("meta");
+    k.clear(); e.clear(); m.clear();
+    K.forEach(x => k.put(x)); E.forEach(x => e.put(x)); M.forEach(x => m.put(x));
+    if (lockMeta) m.put({ k:"lock", v:lockMeta });
+    t.oncomplete = () => res(); t.onerror = () => rej(t.error); t.onabort = () => rej(t.error);
+  });
+}
+async function enablePin(pin, timeout){
+  const salt = crypto.getRandomValues(new Uint8Array(16)), keys = await deriveLock(pin, salt);
+  const data = await rewriteAll(keys);
+  await commitAll(data, { salt:B64.enc(salt), check: await encWith(keys, "LBE-OK"), timeout });
+  LOCK.key = keys.key; LOCK.hkey = keys.hkey;
+}
+async function disablePin(){
+  const data = await rewriteAll(null);
+  await commitAll(data, null);
+  LOCK.key = null; LOCK.hkey = null; delete S.meta.lock;
+}
+async function tryUnlock(pin){
+  const lk = S.meta.lock; if (!lk) return true;
+  const keys = await deriveLock(pin, B64.dec(lk.salt));
+  try { if (await decWith(keys, lk.check) !== "LBE-OK") return false; } catch(_) { return false; }
+  LOCK.key = keys.key; LOCK.hkey = keys.hkey; return true;
+}
+async function lockNow(reason){
+  if (!S.meta.lock || S.locked) return;
+  const c = $("cText");
+  S.keepDraft = c && c.value.trim() ? { kind:$("cKind")?.value, sit:$("cSit")?.value, when:$("cWhen")?.value, text:c.value, mesk:$("cMesk")?.value } : S.keepDraft || null;
+  try { stopAuto(); stopLive(); } catch(_) {}
+  try { S.wake?.release(); } catch(_) {}
+  LOCK.key = null; LOCK.hkey = null;
+  Object.assign(S, { locked:true, kinder:[], eintraege:[], qr:null, msg:null, pendingImport:null, edit:null, confirm:null, view:"home", clearDraft:true });
+  S.scan = { parts:{}, total:0, set:null };
+  const m = await getAllRaw("meta"); S.meta = Object.fromEntries(m.filter(x => !x.enc).map(x => [x.k, x.v]));
+  document.querySelectorAll(".modal, dialog").forEach(x => x.remove());
+  render(); if (reason) flash(reason);
+}
+var S_lastAct = Date.now();
+["pointerdown","keydown","touchstart","input"].forEach(ev => document.addEventListener(ev, () => { S_lastAct = Date.now(); }, { passive:true, capture:true }));
+const lockTimeoutMs = () => { const t = S.meta.lock?.timeout; return (t === undefined ? 5 : +t) * 60000; };
+setInterval(() => { if (S.meta.lock && !S.locked && lockTimeoutMs() > 0 && Date.now() - S_lastAct > lockTimeoutMs()) lockNow("Automatisch gesperrt."); }, 10000);
+document.addEventListener("visibilitychange", () => {
+  if (!S.meta.lock || S.locked) return;
+  if (document.visibilityState === "hidden") { S.hiddenAt = Date.now(); return; }
+  const away = Date.now() - (S.hiddenAt || Date.now());
+  if (lockTimeoutMs() === 0 ? away > 15000 : Date.now() - S_lastAct > lockTimeoutMs()) lockNow("Automatisch gesperrt.");
+});
+function renderLock(){
+  const wait = S.lockWaitUntil && S.lockWaitUntil > Date.now();
+  return `<section class="panel" style="max-width:420px;margin:24px auto;text-align:center">
+    <div style="font-size:2rem" aria-hidden="true">🔒</div><h2>Logbuch gesperrt</h2>
+    <form id="unlockForm" autocomplete="off" style="display:grid;gap:10px;margin-top:10px">
+      <label for="pinIn" class="hint">PIN eingeben</label>
+      <input type="password" id="pinIn" inputmode="numeric" autocomplete="off" maxlength="12" style="text-align:center;font-size:1.4rem;letter-spacing:.3em" ${wait ? "disabled" : ""}>
+      <button class="btn primary" type="submit" ${wait ? "disabled" : ""}>${S.unlocking ? "Wird entsperrt …" : "Entsperren"}</button>
+    </form>
+    ${wait ? `<p class="hint">Zu viele falsche Versuche. Bitte kurz warten.</p>` : ""}
+    <details style="margin-top:16px;text-align:left"><summary class="hint">PIN vergessen?</summary>
+      <p class="hint">Ohne PIN können die Daten auf diesem Gerät nicht entschlüsselt werden – auch nicht von mir oder der Schule. Du kannst das Logbuch auf diesem Gerät zurücksetzen und die Daten danach per Abgleich vom anderen Gerät oder aus einer Sicherung zurückholen.</p>
+      ${S.confirm === "reset" ? `<div class="conf">Wirklich alle Daten auf diesem Gerät löschen? <button class="btn danger" data-reset-yes>Ja, zurücksetzen</button><button class="btn" data-del-no>Abbrechen</button></div>`
+        : `<button class="btn danger" data-reset>Logbuch auf diesem Gerät zurücksetzen …</button>`}</details></section>`;
+}
+function pinPanel(){
+  const on = !!S.meta.lock, t = S.meta.lock?.timeout ?? 5;
+  const opts = [[0,"sofort, wenn ich die App verlasse"],[1,"nach 1 Minute ohne Nutzung"],[5,"nach 5 Minuten ohne Nutzung"],[15,"nach 15 Minuten ohne Nutzung"],[60,"nach 60 Minuten ohne Nutzung"]]
+    .map(([v,l]) => `<option value="${v}"${+t === v ? " selected" : ""}>${l}</option>`).join("");
+  if (!on) return `<section class="panel"><h3>App-Sperre (PIN)</h3>
+    <p class="hint" style="margin:0 0 8px">Nur für dieses Gerät. Mit PIN werden die Daten hier verschlüsselt gespeichert und die App fragt nach der PIN, bevor sie etwas anzeigt.</p>
+    <form id="pinOnForm" autocomplete="off">
+      <div class="row"><div class="field"><label for="pinA">Neue PIN (6–12 Ziffern)</label><input type="password" id="pinA" inputmode="numeric" maxlength="12" autocomplete="new-password"></div>
+        <div class="field"><label for="pinB">PIN wiederholen</label><input type="password" id="pinB" inputmode="numeric" maxlength="12" autocomplete="new-password"></div></div>
+      <div class="field" style="margin-top:8px"><label for="pinT">Wieder sperren</label><select id="pinT">${opts}</select></div>
+      <div class="warnbox" style="margin-top:8px">PIN gut merken: Ohne sie sind die Daten auf diesem Gerät nicht mehr lesbar. Zurückholen geht dann nur per Abgleich oder aus einer Sicherung.</div>
+      <div class="row" style="margin-top:8px"><button class="btn primary" type="submit">${S.pinBusy ? "Wird verschlüsselt …" : "PIN einschalten"}</button></div></form></section>`;
+  return `<section class="panel"><h3>App-Sperre (PIN)</h3>
+    <p style="margin:0 0 8px">✓ Eingeschaltet. Die Daten auf diesem Gerät sind verschlüsselt.</p>
+    <div class="field"><label for="pinT2">Wieder sperren</label><select id="pinT2">${opts}</select></div>
+    <div class="row" style="margin-top:8px"><button class="btn" data-lock-now>Jetzt sperren</button>
+      <button class="btn" data-pin-mode="change">PIN ändern</button><button class="btn ghost" data-pin-mode="off">PIN ausschalten</button></div>
+    ${S.pinMode === "change" ? `<form id="pinChgForm" autocomplete="off" style="margin-top:10px">
+      <div class="row"><div class="field"><label for="pinOld">Aktuelle PIN</label><input type="password" id="pinOld" inputmode="numeric" maxlength="12"></div>
+      <div class="field"><label for="pinA">Neue PIN</label><input type="password" id="pinA" inputmode="numeric" maxlength="12" autocomplete="new-password"></div>
+      <div class="field"><label for="pinB">Neue PIN wiederholen</label><input type="password" id="pinB" inputmode="numeric" maxlength="12" autocomplete="new-password"></div></div>
+      <div class="row" style="margin-top:8px"><button class="btn primary" type="submit">PIN ändern</button><button class="btn ghost" type="button" data-pin-mode="">Abbrechen</button></div></form>` : ""}
+    ${S.pinMode === "off" ? `<form id="pinOffForm" autocomplete="off" style="margin-top:10px">
+      <div class="field"><label for="pinOld">Aktuelle PIN zur Bestätigung</label><input type="password" id="pinOld" inputmode="numeric" maxlength="12"></div>
+      <p class="hint">Danach liegen die Daten auf diesem Gerät wieder unverschlüsselt im Browser.</p>
+      <div class="row"><button class="btn danger" type="submit">PIN ausschalten</button><button class="btn ghost" type="button" data-pin-mode="">Abbrechen</button></div></form>` : ""}
+  </section>`;
+}
+const validPin = p => /^\d{6,12}$/.test(p);
 const getMeta = async k => { const all = await getAll("meta"); return all.find(m => m.k === k)?.v; };
 const setMeta = (k, v) => putMany("meta", [{k, v}]);
 
-const S = { kinder:[], eintraege:[], meta:{}, view:"home", kindId:null, filter:"all", asc:false, confirm:null,
+const S = { locked:false, kinder:[], eintraege:[], meta:{}, view:"home", kindId:null, filter:"all", asc:false, confirm:null,
             manualMesk:false, qr:null, scan:{parts:{}, total:0, set:null}, pendingImport:null };
 async function load(){
+  if (S.locked) return;
   S.kinder = (await getAll("kinder"));
   S.eintraege = (await getAll("eintraege"));
   const known = new Set(S.kinder.map(k => k.id));
@@ -12593,6 +12742,7 @@ async function load(){
   }
   const m = await getAll("meta"); S.meta = Object.fromEntries(m.map(x => [x.k, x.v]));
 }
+async function loadMetaRaw(){ const m = await getAllRaw("meta"); return Object.fromEntries(m.filter(x => !x.enc).map(x => [x.k, x.v])); }
 const aktiveKinder = () => S.kinder.filter(k => !k.geloescht).sort((a,b) => a.kuerzel.localeCompare(b.kuerzel,"de"));
 const eintraegeVon = id => S.eintraege.filter(e => e.kindId === id && !e.geloescht).sort((a,b) => b.ts.localeCompare(a.ts));
 
@@ -12641,6 +12791,9 @@ async function mergePayload(p){
     if (!cur) { ePut.push(e); if (!e.geloescht) res.neu++; }
     else if (e.geaendert > cur.geaendert) { ePut.push(e); if (e.geloescht && !cur.geloescht) res.geloescht++; else res.aktualisiert++; }
     else res.vorhanden++; }
+  if (p.einstellungen?.redact) { const alt = String(S.meta.redact || "").split(/[,;\n]/).map(x => x.trim()).filter(Boolean);
+    const neu = String(p.einstellungen.redact).split(/[,;\n]/).map(x => x.trim()).filter(x => x && !alt.includes(x));
+    if (neu.length) await setMeta("redact", [...alt, ...neu].join(", ")); }
   if (kPut.length) await putMany("kinder", kPut);
   if (ePut.length) await putMany("eintraege", ePut);
   await load();
@@ -12705,6 +12858,9 @@ function render(){
   const v = $("view");
   const draft = $("cText") && !S.clearDraft ? { kind:$("cKind").value, sit:$("cSit").value, when:$("cWhen").value, text:$("cText").value, mesk:$("cMesk").value, manual:S.manualMesk } : null;
   S.clearDraft = false;
+  const lb = document.querySelector("header [data-lock-now]"); if (lb) lb.hidden = !S.meta.lock || S.locked;
+  document.querySelector("header .nav").style.visibility = S.locked ? "hidden" : "";
+  if (S.locked) { v.innerHTML = renderLock(); setTimeout(() => $("pinIn")?.focus(), 50); return; }
   if (!S.meta.lehrkraft) { v.innerHTML = renderSetup(); return; }
   v.innerHTML = S.view === "sync" ? renderSync() : S.view === "settings" ? renderSettings() : S.view === "kind" ? renderKind() : renderHome();
   if (S.view === "home" || S.view === "kind") { initCapture();
@@ -12713,6 +12869,9 @@ function render(){
       $("cMesk").value = draft.mesk; if (draft.text) updateSuggestion(); } }
   if (S.view === "sync" && S.qr) drawQr();
   if (S.view === "sync" && S.msg) drawMsg();
+  if (S.keepDraft && $("cText") && S.view === "home") { const d = S.keepDraft; S.keepDraft = null;
+    if (d.kind && [...$("cKind").options].some(o => o.value === d.kind)) $("cKind").value = d.kind;
+    if (d.sit !== undefined) $("cSit").value = d.sit; if (d.when) $("cWhen").value = d.when; $("cText").value = d.text; if (d.mesk !== undefined) $("cMesk").value = d.mesk; updateSuggestion(); }
 }
 const meskOptions = sel => `<option value="">Kein Bereich</option>` + MESK.map(a => `<option value="${a.k}"${a.k===sel?" selected":""}>${esc(a.l)}</option>`).join("");
 
@@ -12754,6 +12913,7 @@ function initCapture(){
   $("cMesk").addEventListener("change", () => { S.manualMesk = true; });
 }
 function updateSuggestion(){
+  if (!$("cText") || !$("cSuggest")) return;
   const s = suggestMesk($("cText").value);
   const box = $("cSuggest");
   if (!s) { box.innerHTML = $("cText").value.trim() ? "Kein Vorschlag erkannt. Bitte Bereich selbst wählen." : ""; if (!S.manualMesk) $("cMesk").value = ""; return; }
@@ -12775,12 +12935,16 @@ function renderHome(){
       <div class="strip" aria-label="Einträge je MesK-Bereich">${strip}</div>
       <div class="t"><span class="meta">${es.length} Einträge${es[0] ? " · zuletzt " + daysAgo(es[0].ts) : ""}</span>${woche ? `<span class="wk">+${woche} diese Woche</span>` : ""}</div></button>`; }).join("");
   const letzter = S.meta.letzterAbgleich ? `Letzter Abgleich: ${daysAgo(S.meta.letzterAbgleich)}` : "Noch kein Abgleich";
+  const echte = S.eintraege.some(e => !e.geloescht && !aktiveKinder().find(k => k.id === e.kindId)?.beispiel);
+  const sichAlt = !S.meta.letzteSicherung || Date.now() - new Date(S.meta.letzteSicherung) > 7*864e5;
+  const backupHint = echte && sichAlt ? `<div class="msg row" style="align-items:center;justify-content:space-between;margin-bottom:10px"><span>${S.meta.letzteSicherung ? `Letzte Sicherung ${daysAgo(S.meta.letzteSicherung)}.` : "Noch keine Sicherung gespeichert."} Einmal pro Woche sichern schützt vor Datenverlust.</span>
+    ${S.meta.teampw ? `<button class="btn" data-backup>Jetzt sichern</button>` : `<button class="btn" data-nav="sync">Team-Passwort festlegen</button>`}</div>` : "";
   return `${captureHtml(null)}
     <section class="panel">
       <div class="row" style="justify-content:space-between;align-items:baseline"><h2>Kinder</h2>
         <span class="hint">${S.eintraege.filter(e => !e.geloescht && new Date(e.ts) >= weekAgo).length} Einträge in 7 Tagen · ${offen} ohne Bereich · ${letzter}</span></div>
       <div class="legend"><span><i class="sw g-selbst"></i>Selbstkompetenz</span><span><i class="sw g-sozial"></i>Sozialkompetenz</span><span><i class="sw g-lern"></i>Lernkompetenz</span><span>Streifen auf der Karte = die 8 MesK-Bereiche; farbig = es gibt Einträge</span></div>
-      ${kinder.length ? `<div class="cards">${cards}</div>` : `<div class="empty"><span>Noch keine Kinder angelegt.</span><button class="btn" data-demo>Beispieldaten zum Ausprobieren laden</button></div>`}
+      ${backupHint}${kinder.length ? `<div class="cards">${cards}</div>` : `<div class="empty"><span>Noch keine Kinder angelegt.</span><button class="btn" data-demo>Beispieldaten zum Ausprobieren laden</button></div>`}
       <form class="row" id="addKind" autocomplete="off">
         <div class="field"><label for="nKz">Neues Kind (Kürzel)</label><input type="text" id="nKz" maxlength="12" placeholder="z. B. A.M."></div>
         <div class="field"><label for="nKl">Klasse</label><input type="text" id="nKl" maxlength="12" placeholder="z. B. 5b"></div>
@@ -12901,6 +13065,30 @@ function renderSync(){
     </section>`;
 }
 
+function backupPanel(){
+  const pwSet = !!S.meta.teampw, last = S.meta.letzteSicherung;
+  return `<section class="panel" id="backupPanel"><h3>Datensicherung</h3>
+      <p style="margin:0 0 8px">${last ? `Letzte Sicherung: <b>${daysAgo(last)}</b> (${new Date(last).toLocaleDateString("de-DE")})` : "<b>Noch keine Sicherung gespeichert.</b>"}</p>
+      <div class="row"><button class="btn primary" data-backup ${pwSet ? "" : "disabled"}>Sicherung jetzt speichern</button>
+        <label class="btn" for="restoreIn" style="display:inline-block">Sicherung wiederherstellen …</label>
+        <input type="file" id="restoreIn" accept=".lbe,.txt,text/plain" hidden></div>
+      ${pwSet ? "" : `<div class="hint">Zuerst unter „Abgleich“ das Team-Passwort festlegen – damit wird die Sicherung verschlüsselt.</div>`}
+      <ul class="steps" style="list-style:disc;margin-top:8px">
+        <li>Die Sicherung enthält <b>alle</b> Kinder, Einträge, Änderungen und Löschungen sowie die Anonymisierungs-Liste – verschlüsselt mit dem Team-Passwort.</li>
+        <li>Sie landet im Ordner „Downloads“. Von dort am besten auf einen geschützten Speicher kopieren (z. B. LOGINEO-Cloud oder verschlüsselter USB-Stick).</li>
+        <li>Wiederherstellen <b>ergänzt</b> die vorhandenen Daten (es wird nichts überschrieben, was neuer ist). Funktioniert auch auf einem neuen Handy oder am PC.</li>
+        <li>Ohne das Team-Passwort ist die Sicherung nicht lesbar – Passwort gut merken.</li></ul></section>`;
+}
+async function doBackup(){
+  if (!S.meta.teampw) { flash("Bitte zuerst unter „Abgleich“ das Team-Passwort festlegen.", true); return; }
+  try {
+    const p = { ...buildPayload(null), sicherung:true, einstellungen:{ redact:S.meta.redact || "" } };
+    const sealed = await seal(p, S.meta.teampw);
+    const name = `logbuch-sicherung_${(S.meta.lehrkraft||"").replace(/[^A-Za-z0-9]/g,"")}_${new Date().toLocaleDateString("sv-SE")}.txt`;
+    if (await saveFile(name, sealed)) { await setMeta("letzteSicherung", nowIso()); await load(); render();
+      flash(`Sicherung mit ${aktiveKinder().length} Kindern und ${S.eintraege.filter(e => !e.geloescht).length} Einträgen gespeichert (Ordner „Downloads“, Datei ${name}).`); }
+  } catch (e) { flash("Die Sicherung konnte nicht erstellt werden (" + (e?.message || e) + ").", true); }
+}
 function renderSettings(){
   return `<section class="panel"><h2>Einstellungen</h2>
       <form class="row" id="kzForm" autocomplete="off"><div class="field"><label for="setKz">Mein Kürzel</label><input type="text" id="setKz" maxlength="8" value="${esc(S.meta.lehrkraft||"")}"></div><button class="btn" type="submit">Speichern</button></form></section>
@@ -12909,15 +13097,15 @@ function renderSettings(){
         <textarea id="redact" style="min-height:70px" placeholder="z. B. Vornamen von Integrationskräften, Geschwistern, Orte, Einrichtungen">${esc(S.meta.redact||"")}</textarea>
         <div class="row" style="margin-top:8px"><button class="btn" type="submit">Speichern</button></div></form>
       <p class="hint" style="margin:0">Diese Wörter werden im anonymisierten Text durch „[Person]“ ersetzt. Die Liste bleibt auf diesem Gerät.</p></section>
-    <section class="panel"><h3>Datensicherung</h3>
-      <p class="hint" style="margin:0">Die Daten liegen nur in diesem Browser bzw. dieser App. Wer die Browserdaten löscht, löscht auch das Logbuch. Speichere regelmäßig eine verschlüsselte Sicherung (Abgleich → „Alles“ → „Als Datei speichern“) an einem geschützten Ort.</p></section>
+    ${pinPanel()}
+    ${backupPanel()}
     <section class="panel"><h3>Speicherort und Datenschutz</h3>
-      <ul class="steps" style="list-style:disc"><li>Alle Einträge liegen nur auf diesem Gerät.</li><li>Abgleich-Codes und -Dateien sind mit AES-256 verschlüsselt (Schlüssel aus dem Team-Passwort).</li>
+      <ul class="steps" style="list-style:disc"><li>Alle Einträge liegen nur auf diesem Gerät – ${S.meta.lock ? "mit PIN verschlüsselt" : "ohne PIN unverschlüsselt im Browser"}.</li><li>Abgleich-Codes und -Dateien sind mit AES-256 verschlüsselt (Schlüssel aus dem Team-Passwort).</li>
       <li>Die MesK-Vorschläge entstehen über eine Schlüsselwortliste im Gerät, ohne KI und ohne Internet.</li>
       <li>Bitte nur Kürzel verwenden, keine Diagnosen oder Familiendetails.</li></ul></section>
     <p class="hint" style="margin:0;text-align:center">Logbuch ESE · Version ${APP_VERSION}</p>
     <section class="panel danger-zone"><h3>Alles löschen</h3>
-      ${S.confirm === "all" ? `<div class="conf">Alle Kinder und Einträge auf diesem Gerät löschen? <button class="btn danger" data-wipe-yes>Alles löschen</button><button class="btn" data-del-no>Abbrechen</button></div>`
+      ${S.confirm === "all" ? `<div class="conf">Alle Kinder und Einträge auf diesem Gerät löschen? ${S.meta.teampw ? `<button class="btn" data-backup>Vorher sichern</button>` : ""}<button class="btn danger" data-wipe-yes>Alles löschen</button><button class="btn" data-del-no>Abbrechen</button></div>`
         : `<div><button class="btn danger" data-wipe>Alle Daten auf diesem Gerät löschen …</button></div>`}
       <p class="hint" style="margin:0">Das betrifft nur dieses Gerät, nicht die Geräte der Kolleg:innen.</p></section>`;
 }
@@ -12925,7 +13113,7 @@ function renderSettings(){
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
 const MSG_CHUNK = 2800;
-const APP_VERSION = "11";
+const APP_VERSION = "13";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -13043,7 +13231,7 @@ function drawMsg(){
 }
 async function tryImport(sealed){
   const pw = S.meta.teampw;
-  if (!pw) { S.pendingImport = sealed; render(); return; }
+  if (!pw) { S.pendingImport = sealed; S.view = "sync"; render(); flash("Bitte das Team-Passwort eingeben, mit dem die Daten verschlüsselt wurden."); return; }
   await doImport(sealed, pw);
 }
 async function doImport(sealed, pw){
@@ -13052,9 +13240,10 @@ async function doImport(sealed, pw){
     const r = await mergePayload(p);
     await setMeta("letzterAbgleich", nowIso()); await load();
     S.pendingImport = null; S.scan = { parts:{}, total:0, set:null };
+    if (p.sicherung) { flash(`Sicherung vom ${new Date(p.erstellt).toLocaleDateString("de-DE")} (${p.von || "?"}) eingelesen: ${r.neu} Einträge wiederhergestellt, ${r.aktualisiert} aktualisiert, ${r.vorhanden} waren schon vorhanden${r.kinder ? `; ${r.kinder} Kinder wiederhergestellt` : ""}.`); render(); return; }
     flash(`Abgleich von ${p.von || "?"} mit ${r.gesamt} Einträgen: ${r.neu} neu übernommen, ${r.aktualisiert} aktualisiert, ${r.geloescht} gelöscht, ${r.vorhanden} waren schon vorhanden${r.kinder ? `; ${r.kinder} neue Kinder` : ""}.`);
   } catch (e) {
-    if (e.message === "passwort") { S.pendingImport = sealed; render();
+    if (e.message === "passwort") { S.pendingImport = sealed; S.view = "sync"; render();
       flash("Das Team-Passwort passt nicht zu diesem Abgleich. Die Codes sind gespeichert – gib unten das Passwort des sendenden Geräts ein.", true); return; }
     flash(e.message === "kompression" ? "Dieses Gerät kann den Abgleich nicht entpacken. Bitte Browser aktualisieren." : "Der Abgleich konnte nicht gelesen werden.", true);
   }
@@ -13073,6 +13262,7 @@ document.addEventListener("click", async ev => {
   if (d.edit) { S.edit = d.edit; S.confirm = null; render(); $("eText")?.focus(); return; }
   if ("editCancel" in d) { S.edit = null; render(); return; }
   if (d.del) { S.confirm = d.del; render(); return; }
+  if ("delNo" in d && S.locked) { S.confirm = null; render(); return; }
   if ("delNo" in d) { S.confirm = null; render(); return; }
   if (d.delYes) { const e = S.eintraege.find(x => x.id === d.delYes); await putMany("eintraege", [{...e, text:"", geloescht:true, geaendert:nowIso()}]); await load(); S.confirm = null; render(); return; }
   if ("kdel" in d) { S.confirm = "kind"; render(); return; }
@@ -13081,8 +13271,14 @@ document.addEventListener("click", async ev => {
     await putMany("kinder", [{...k, klasse:"", geloescht:true, geaendert:t}]); await load(); S.confirm = null; S.view = "home"; render(); flash(`${k.kuerzel} wurde gelöscht.`); return; }
   if ("wipe" in d) { S.confirm = "all"; render(); return; }
   if ("wipeYes" in d) { await tx("kinder","readwrite",s => s.clear()); await tx("eintraege","readwrite",s => s.clear());
-    await tx("meta","readwrite",s => s.clear()); await load(); S.confirm = null; S.view = "home"; render(); flash("Alle Daten auf diesem Gerät wurden gelöscht."); return; }
+    await tx("meta","readwrite",s => s.clear()); LOCK.key = null; LOCK.hkey = null; S.meta = {}; await load(); S.confirm = null; S.view = "home"; render(); flash("Alle Daten auf diesem Gerät wurden gelöscht."); return; }
   if ("demo" in d) return loadDemo();
+  if ("lockNow" in d) return lockNow();
+  if (d.pinMode !== undefined) { S.pinMode = d.pinMode || null; render(); $("pinOld")?.focus(); return; }
+  if ("reset" in d) { S.confirm = "reset"; render(); document.querySelector("details")?.setAttribute("open",""); return; }
+  if ("resetYes" in d) { await tx("kinder","readwrite",s => s.clear()); await tx("eintraege","readwrite",s => s.clear()); await tx("meta","readwrite",s => s.clear());
+    LOCK.key = null; LOCK.hkey = null; S.meta = {}; S.locked = false; S.confirm = null; S.keepDraft = null; await load(); render(); flash("Das Logbuch auf diesem Gerät wurde zurückgesetzt. Hol dir die Daten per Abgleich oder aus einer Sicherung zurück."); return; }
+  if ("backup" in d) return doBackup();
   if ("pwClear" in d) { await tx("meta","readwrite",s => s.delete("teampw")); await load(); render(); return; }
   if ("sendQr" in d) { try { const x = await makeExport(); if (!x) return; const set = rid(6);
       const chunks = x.sealed.match(new RegExp(`.{1,${CHUNK}}`, "g"));
@@ -13115,7 +13311,7 @@ document.addEventListener("click", async ev => {
   if ("msgDone" in d) { const n = S.msg?.count || 0; S.msg = null; await afterExport(); render(); flash(`Abgleich mit ${n} Einträgen gesendet.`); return; }
   if ("msgCancel" in d) { S.msg = null; const a = $("shareArea"); if (a) a.innerHTML = ""; return; }
   if ("sendFile" in d) { let x; try { x = await makeExport(); } catch (e) { flash("Die Datei konnte nicht erstellt werden (" + (e?.message || e) + ").", true); return; } if (!x) return;
-    const name = `logbuch-abgleich_${(S.meta.lehrkraft||"").replace(/[^A-Za-z0-9]/g,"")}_${new Date().toISOString().slice(0,10)}.txt`;
+    const name = `logbuch-abgleich_${(S.meta.lehrkraft||"").replace(/[^A-Za-z0-9]/g,"")}_${new Date().toLocaleDateString("sv-SE")}.txt`;
     const ok = await saveFile(name, x.sealed);
     if (ok) { await afterExport(); render(); flash(`Abgleich-Datei mit ${x.count} Einträgen gespeichert (Ordner „Downloads“).`); } return; }
   if ("anon" in d) { const k = S.kinder.find(x => x.id === S.kindId); const txt = buildAnon(k, $("aAuftrag").value, false);
@@ -13127,7 +13323,7 @@ document.addEventListener("click", async ev => {
   if ("scanReset" in d) { S.scan = { parts:{}, total:0, set:null }; S.pendingImport = null; render(); return; }
 });
 document.addEventListener("change", async ev => {
-  const t = ev.target;
+  const t = ev.target; if (S.locked) { if (t.type === "file") t.value = ""; return; }
   if (t.dataset.mesk) { const e = S.eintraege.find(x => x.id === t.dataset.mesk); await putMany("eintraege", [{...e, mesk:t.value, geaendert:nowIso()}]); await load(); render(); return; }
   if (t.id === "pwShow") { for (const id of ["pw1","pw1b","pw2"]) { const el = $(id); if (el) el.type = t.checked ? "text" : "password"; } return; }
   if (t.id === "scanIn" && t.files[0]) {
@@ -13139,10 +13335,35 @@ document.addEventListener("change", async ev => {
     } catch (e) { flash(e.message === "kein-lbe" ? "Das ist kein Logbuch-Code." : "Das Foto konnte nicht gelesen werden.", true); }
     return;
   }
+  if (t.id === "pinT2") { await putManyRaw("meta", [{ k:"lock", v:{ ...S.meta.lock, timeout:+t.value } }]); await load(); flash("Gespeichert."); return; }
+  if (t.id === "restoreIn" && t.files[0]) { const txt = await t.files[0].text(); t.value = ""; S.restoring = true; await importText(txt); S.restoring = false; return; }
   if (t.id === "fileIn" && t.files[0]) { const txt = await t.files[0].text(); t.value = ""; await importText(txt); return; }
 });
 document.addEventListener("submit", async ev => {
   ev.preventDefault(); const f = ev.target;
+  if (f.id === "unlockForm") { const pin = $("pinIn").value; if (!pin || S.unlocking) return;
+    S.unlocking = true; render();
+    const ok = await tryUnlock(pin); S.unlocking = false;
+    if (!ok) { S.lockFails = (S.lockFails || 0) + 1;
+      if (S.lockFails >= 5) { S.lockWaitUntil = Date.now() + 30000; S.lockFails = 0; setTimeout(() => { if (S.locked) render(); }, 30500); }
+      render(); flash("PIN falsch.", true); return; }
+    S.lockFails = 0; S.locked = false; S_lastAct = Date.now(); await load(); render(); flash(""); return; }
+  if (f.id === "pinOnForm") { const a = $("pinA").value, b = $("pinB").value;
+    if (!validPin(a)) { flash("Die PIN muss aus 6 bis 12 Ziffern bestehen.", true); return; }
+    if (a !== b) { flash("Die beiden PINs stimmen nicht überein.", true); return; }
+    S.pinBusy = true; render();
+    try { await enablePin(a, +$("pinT").value); S.pinBusy = false; await load(); render(); flash("PIN eingeschaltet. Die Daten auf diesem Gerät sind jetzt verschlüsselt."); }
+    catch (e) { S.pinBusy = false; render(); flash("Das hat nicht geklappt (" + (e?.message || e) + "). Es wurde nichts verändert.", true); } return; }
+  if (f.id === "pinChgForm" || f.id === "pinOffForm") { const old = $("pinOld").value; const lk = S.meta.lock;
+    const okKeys = await deriveLock(old, B64.dec(lk.salt)); let ok = false; try { ok = await decWith(okKeys, lk.check) === "LBE-OK"; } catch(_) {}
+    if (!ok) { flash("Die aktuelle PIN ist falsch.", true); return; }
+    try {
+      if (f.id === "pinOffForm") { await disablePin(); S.pinMode = null; await load(); render(); flash("PIN ausgeschaltet. Die Daten liegen wieder unverschlüsselt auf diesem Gerät."); return; }
+      const a = $("pinA").value, b = $("pinB").value;
+      if (!validPin(a)) { flash("Die neue PIN muss aus 6 bis 12 Ziffern bestehen.", true); return; }
+      if (a !== b) { flash("Die beiden neuen PINs stimmen nicht überein.", true); return; }
+      await enablePin(a, lk.timeout ?? 5); S.pinMode = null; await load(); render(); flash("PIN geändert.");
+    } catch (e) { flash("Das hat nicht geklappt (" + (e?.message || e) + "). Es wurde nichts verändert.", true); } return; }
   if (f.id === "setupForm" || f.id === "kzForm") { const v = (f.id === "setupForm" ? $("setupKz") : $("setKz")).value.trim();
     if (!v) { flash("Bitte ein Kürzel eingeben.", true); return; } await setMeta("lehrkraft", v); await load(); render(); flash("Gespeichert."); return; }
   if (f.id === "addKind") { const kz = $("nKz").value.trim(), kl = $("nKl").value.trim();
@@ -13210,7 +13431,7 @@ async function loadDemo(){
 
 /* ================= Start ================= */
 (async () => {
-  try { DB.db = await idbOpen(); await load(); }
+  try { DB.db = await idbOpen(); const m0 = await loadMetaRaw(); if (m0.lock) { S.locked = true; S.meta = m0; } else await load(); }
   catch(e) { $("view").innerHTML = `<div class="panel"><h2>Speicher nicht verfügbar</h2><p>Dieser Browser erlaubt keine lokale Speicherung (z. B. privates Fenster). Bitte normal öffnen.</p></div>`; return; }
   render();
   if ("serviceWorker" in navigator && location.protocol === "https:" && !window.claude) { navigator.serviceWorker.register("sw.js").catch(() => {}); }
