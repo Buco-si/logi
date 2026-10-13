@@ -13016,8 +13016,8 @@ function renderSync(){
      <div class="hint">${Object.keys(sc.parts).length} von ${sc.total} Codes eingelesen.</div>` : "";
   return `<section class="panel"><h2>So funktioniert der Abgleich</h2>
       <ol class="steps"><li>Beide nutzen dasselbe <b>Team-Passwort</b>. Es verlässt nie das Gerät und wird nur persönlich weitergegeben.</li>
-      <li><b>Senden:</b> „Als Nachricht senden“ → per Threema, Signal oder Mail an die Kollegin/den Kollegen schicken. Der Text ist verschlüsselt.</li>
-      <li><b>Empfangen:</b> Nachricht lange antippen → Kopieren, dann hier „Aus Zwischenablage einlesen“. Doppelte Einträge werden erkannt.</li></ol>
+      <li><b>Senden:</b> „Als Nachricht senden“ → Threema, Signal oder Mail wählen → an die Kollegin/den Kollegen schicken. Der Inhalt ist verschlüsselt.</li>
+      <li><b>Empfangen:</b> Den Link in der Nachricht antippen – fertig. (Falls sich nur der Browser öffnet: ist trotzdem richtig, die Daten landen im selben Logbuch.) Doppelte Einträge werden erkannt.</li></ol>
       <div class="hint">Version ${APP_VERSION} – beide Geräte sollten dieselbe Version anzeigen.</div></section>
     <section class="panel"><h3>Team-Passwort</h3>
       ${pwSet ? `<div class="row"><span class="hint">Auf diesem Gerät gespeichert.</span><button class="btn ghost" data-pw-clear>Passwort entfernen</button></div>`
@@ -13037,7 +13037,7 @@ function renderSync(){
       <div class="row"><button class="btn primary" data-send-msg ${pwSet ? "" : "disabled"}>Als Nachricht senden</button>
         <button class="btn" data-send-qr ${pwSet ? "" : "disabled"}>QR-Code anzeigen</button>
         <button class="btn ghost" data-send-file ${pwSet ? "" : "disabled"}>Als Datei speichern</button></div>
-      <div class="hint">„Als Nachricht senden“: verschlüsselter Text für Threema, Signal oder E-Mail. Auf dem anderen Handy die Nachricht kopieren und unter „Empfangen“ einfügen.</div>
+      <div class="hint">„Als Nachricht senden“ öffnet direkt das Teilen-Menü (Threema, Signal, Mail …). Die Nachricht enthält einen verschlüsselten Link – auf dem anderen Gerät genügt ein Antippen.</div>
       ${pwSet ? "" : `<div class="hint">Zuerst das Team-Passwort festlegen.</div>`}
       <div id="shareArea"></div>
       <div id="qrArea"></div>
@@ -13113,7 +13113,7 @@ function renderSettings(){
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
 const MSG_CHUNK = 2800;
-const APP_VERSION = "13";
+const APP_VERSION = "14";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -13202,6 +13202,25 @@ function addPart(text){
   S.scan.set = set; S.scan.total = +n; S.scan.parts[+i] = chunk;
   return Object.keys(S.scan.parts).length === S.scan.total;
 }
+/* Abgleich-Link: Die Daten stehen hinter dem „#“ der Adresse. Dieser Teil wird vom Browser
+   nie an den Server (GitHub) geschickt, er bleibt auf dem Gerät. */
+function appBase(){
+  if (window.claude || !/^https?:$/.test(location.protocol)) return "";
+  return location.origin + location.pathname;
+}
+function saveScan(){ try { if (S.scan.total) localStorage.setItem("lbeScan", JSON.stringify(S.scan)); else localStorage.removeItem("lbeScan"); } catch(_) {} }
+function restoreScan(){ try { const x = JSON.parse(localStorage.getItem("lbeScan") || "null"); if (x && x.total) S.scan = x; } catch(_) {} }
+async function handleLink(){
+  const h = location.hash || "";
+  if (!h.includes("LBE1:")) return;
+  const txt = decodeURIComponent(h.slice(1));
+  try { history.replaceState(null, "", location.pathname + location.search); } catch(_) {}
+  if (S.locked || !S.meta.lehrkraft) { S.pendingLink = txt; flash(S.locked ? "Abgleich empfangen – bitte zuerst entsperren, dann wird er übernommen." : "Abgleich empfangen – bitte zuerst dein Kürzel eintragen."); return; }
+  await importText(txt);
+}
+async function runPendingLink(){ if (S.pendingLink && !S.locked && S.meta.lehrkraft) { const t = S.pendingLink; S.pendingLink = null; await importText(t); } }
+window.addEventListener("hashchange", () => { handleLink(); });
+
 /* Text aus Nachricht/Datei/QR-Scanner: Leerzeichen und Zeilenumbrüche (Mail-Umbruch) werden ignoriert */
 async function importText(txt){
   const s = String(txt || "").replace(/\s+/g, "");
@@ -13213,7 +13232,7 @@ async function importText(txt){
   let complete = false;
   for (const [, set, i, n, chunk] of toks) { try { complete = addPart(`LBE1:${set}:${i}/${n}:${chunk}`); } catch(_) {} }
   if (complete) { const all = Array.from({length:S.scan.total}, (_,i) => S.scan.parts[i+1]).join(""); const p = $("pasteIn"); if (p) p.value = ""; await tryImport(all); }
-  else { render(); flash(`Teil ${Object.keys(S.scan.parts).length} von ${S.scan.total} eingelesen. Bitte die nächste Nachricht kopieren und einfügen.`); }
+  else { saveScan(); render(); flash(`Teil ${Object.keys(S.scan.parts).length} von ${S.scan.total} empfangen. Bitte auch den nächsten Teil antippen bzw. einfügen.`); }
   return true;
 }
 async function copyPlain(t){
@@ -13239,7 +13258,7 @@ async function doImport(sealed, pw){
     const p = await unseal(sealed, pw);
     const r = await mergePayload(p);
     await setMeta("letzterAbgleich", nowIso()); await load();
-    S.pendingImport = null; S.scan = { parts:{}, total:0, set:null };
+    S.pendingImport = null; S.scan = { parts:{}, total:0, set:null }; saveScan();
     if (p.sicherung) { flash(`Sicherung vom ${new Date(p.erstellt).toLocaleDateString("de-DE")} (${p.von || "?"}) eingelesen: ${r.neu} Einträge wiederhergestellt, ${r.aktualisiert} aktualisiert, ${r.vorhanden} waren schon vorhanden${r.kinder ? `; ${r.kinder} Kinder wiederhergestellt` : ""}.`); render(); return; }
     flash(`Abgleich von ${p.von || "?"} mit ${r.gesamt} Einträgen: ${r.neu} neu übernommen, ${r.aktualisiert} aktualisiert, ${r.geloescht} gelöscht, ${r.vorhanden} waren schon vorhanden${r.kinder ? `; ${r.kinder} neue Kinder` : ""}.`);
   } catch (e) {
@@ -13298,8 +13317,16 @@ document.addEventListener("click", async ev => {
   if ("qrDone" in d) { stopAuto(); try { S.wake?.release(); } catch(_) {} const n = S.qr.count; await afterExport(); S.qr = null; render(); flash(`Abgleich mit ${n} Einträgen gesendet. Beim nächsten Mal werden nur neue Einträge übertragen.`); return; }
   if ("sendMsg" in d) { let x; try { x = await makeExport(); } catch (e) { flash("Der Abgleich konnte nicht erstellt werden (" + (e?.message || e) + ").", true); return; } if (!x) return;
     const set = rid(6), chunks = x.sealed.match(new RegExp(`.{1,${MSG_CHUNK}}`, "g")), n = chunks.length, von = S.meta.lehrkraft || "?";
-    const parts = chunks.map((c,i) => `Logbuch ESE – Abgleich von ${von}${n > 1 ? ` (Nachricht ${i+1} von ${n})` : ""}, ${x.count} Einträge.\nEinlesen: Nachricht kopieren → Logbuch-App → Abgleich → „Aus Zwischenablage einlesen“.\n\nLBE1:${set}:${i+1}/${n}:${c}.\n`);
-    S.msg = { parts, sent: parts.map(() => false), count: x.count }; drawMsg(); $("shareArea")?.scrollIntoView({ behavior:"smooth", block:"center" }); return; }
+    const base = appBase();
+    const parts = chunks.map((c,i) => base
+      ? `Logbuch-Abgleich von ${von}: ${x.count} Einträge${n > 1 ? ` (Teil ${i+1} von ${n})` : ""}. Zum Übernehmen antippen:\n${base}#LBE1:${set}:${i+1}/${n}:${c}.\n`
+      : `Logbuch ESE – Abgleich von ${von}${n > 1 ? ` (Nachricht ${i+1} von ${n})` : ""}, ${x.count} Einträge.\nEinlesen: Nachricht kopieren → Logbuch-App → Abgleich → „Aus Zwischenablage einlesen“.\n\nLBE1:${set}:${i+1}/${n}:${c}.\n`);
+    S.msg = { parts, sent: parts.map(() => false), count: x.count };
+    if (n === 1 && navigator.share) {   // ein Tipp: direkt das Teilen-Menü öffnen
+      try { await navigator.share({ text: parts[0] }); S.msg = null; await afterExport(); render(); flash(`Abgleich mit ${x.count} Einträgen gesendet.`); return; }
+      catch (e) { if (e && e.name === "AbortError") { S.msg = null; flash("Senden abgebrochen."); return; } }
+    }
+    drawMsg(); $("shareArea")?.scrollIntoView({ behavior:"smooth", block:"center" }); return; }
   if (d.msgShare !== undefined) { const m = S.msg; if (!m) return; const i = +d.msgShare;
     navigator.share({ text: m.parts[i] })
       .then(() => { m.sent[i] = true; drawMsg(); })
@@ -13347,7 +13374,7 @@ document.addEventListener("submit", async ev => {
     if (!ok) { S.lockFails = (S.lockFails || 0) + 1;
       if (S.lockFails >= 5) { S.lockWaitUntil = Date.now() + 30000; S.lockFails = 0; setTimeout(() => { if (S.locked) render(); }, 30500); }
       render(); flash("PIN falsch.", true); return; }
-    S.lockFails = 0; S.locked = false; S_lastAct = Date.now(); await load(); render(); flash(""); return; }
+    S.lockFails = 0; S.locked = false; S_lastAct = Date.now(); await load(); render(); flash(""); await runPendingLink(); return; }
   if (f.id === "pinOnForm") { const a = $("pinA").value, b = $("pinB").value;
     if (!validPin(a)) { flash("Die PIN muss aus 6 bis 12 Ziffern bestehen.", true); return; }
     if (a !== b) { flash("Die beiden PINs stimmen nicht überein.", true); return; }
@@ -13365,7 +13392,7 @@ document.addEventListener("submit", async ev => {
       await enablePin(a, lk.timeout ?? 5); S.pinMode = null; await load(); render(); flash("PIN geändert.");
     } catch (e) { flash("Das hat nicht geklappt (" + (e?.message || e) + "). Es wurde nichts verändert.", true); } return; }
   if (f.id === "setupForm" || f.id === "kzForm") { const v = (f.id === "setupForm" ? $("setupKz") : $("setKz")).value.trim();
-    if (!v) { flash("Bitte ein Kürzel eingeben.", true); return; } await setMeta("lehrkraft", v); await load(); render(); flash("Gespeichert."); return; }
+    if (!v) { flash("Bitte ein Kürzel eingeben.", true); return; } await setMeta("lehrkraft", v); await load(); render(); flash("Gespeichert."); await runPendingLink(); return; }
   if (f.id === "addKind") { const kz = $("nKz").value.trim(), kl = $("nKl").value.trim();
     if (!kz) { flash("Bitte ein Kürzel eingeben.", true); return; }
     const id = normKz(kz); if (!id) { flash("Das Kürzel braucht Buchstaben oder Ziffern.", true); return; }
@@ -13433,7 +13460,9 @@ async function loadDemo(){
 (async () => {
   try { DB.db = await idbOpen(); const m0 = await loadMetaRaw(); if (m0.lock) { S.locked = true; S.meta = m0; } else await load(); }
   catch(e) { $("view").innerHTML = `<div class="panel"><h2>Speicher nicht verfügbar</h2><p>Dieser Browser erlaubt keine lokale Speicherung (z. B. privates Fenster). Bitte normal öffnen.</p></div>`; return; }
+  restoreScan();
   render();
+  await handleLink();
   if ("serviceWorker" in navigator && location.protocol === "https:" && !window.claude) { navigator.serviceWorker.register("sw.js").catch(() => {}); }
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
 })();
