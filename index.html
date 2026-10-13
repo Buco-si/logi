@@ -94,6 +94,7 @@ textarea{resize:vertical;min-height:92px}
 .warnbox{font-size:.85rem;background:var(--warn-soft);color:var(--warn);border-radius:8px;padding:8px 12px}
 .conf{display:inline-flex;gap:6px;align-items:center;color:var(--crit);flex-wrap:wrap}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 </style>
 
 <div class="wrap">
@@ -12661,7 +12662,7 @@ async function tryUnlock(pin){
 async function lockNow(reason){
   if (!S.meta.lock || S.locked) return;
   const c = $("cText");
-  S.keepDraft = c && c.value.trim() ? { kind:$("cKind")?.value, sit:$("cSit")?.value, when:$("cWhen")?.value, text:c.value, mesk:$("cMesk")?.value } : S.keepDraft || null;
+  S.keepDraft = c && c.value.trim() ? { text:c.value } : S.keepDraft || null;
   try { stopAuto(); stopLive(); } catch(_) {}
   try { S.wake?.release(); } catch(_) {}
   LOCK.key = null; LOCK.hkey = null;
@@ -12877,7 +12878,7 @@ function deAnon(text, kind){
 function render(){
   document.querySelectorAll("[data-nav]").forEach(b => b.setAttribute("aria-current", (b.dataset.nav === S.view || (S.view === "kind" && b.dataset.nav === "home")) ? "page" : "false"));
   const v = $("view");
-  const draft = $("cText") && !S.clearDraft ? { kind:$("cKind").value, sit:$("cSit").value, when:$("cWhen").value, text:$("cText").value, mesk:$("cMesk").value, manual:S.manualMesk } : null;
+  const draft = $("cText") && !S.clearDraft ? { text:$("cText").value } : null;
   S.clearDraft = false;
   const lb = document.querySelector("header [data-lock-now]"); if (lb) lb.hidden = !S.meta.lock || S.locked;
   document.querySelector("header .nav").style.visibility = S.locked ? "hidden" : "";
@@ -12885,14 +12886,11 @@ function render(){
   if (!S.meta.lehrkraft) { v.innerHTML = renderSetup(); return; }
   v.innerHTML = S.view === "sync" ? renderSync() : S.view === "settings" ? renderSettings() : S.view === "kind" ? renderKind() : renderHome();
   if (S.view === "home" || S.view === "kind") { initCapture();
-    if (draft && $("cText")) { if ([...$("cKind").options].some(o => o.value === draft.kind) && (S.view === "home")) $("cKind").value = draft.kind;
-      $("cSit").value = draft.sit; $("cWhen").value = draft.when || $("cWhen").value; $("cText").value = draft.text; S.manualMesk = draft.manual;
-      $("cMesk").value = draft.mesk; if (draft.text) updateSuggestion(); } }
+    if (draft && $("cText")) { $("cText").value = draft.text; if (draft.text) updateSuggestion(); } }
   if (S.view === "sync" && S.qr) drawQr();
   if (S.view === "sync" && S.msg) drawMsg();
   if (S.keepDraft && $("cText") && S.view === "home") { const d = S.keepDraft; S.keepDraft = null;
-    if (d.kind && [...$("cKind").options].some(o => o.value === d.kind)) $("cKind").value = d.kind;
-    if (d.sit !== undefined) $("cSit").value = d.sit; if (d.when) $("cWhen").value = d.when; $("cText").value = d.text; if (d.mesk !== undefined) $("cMesk").value = d.mesk; updateSuggestion(); }
+    $("cText").value = d.text; updateSuggestion(); }
 }
 const meskOptions = sel => `<option value="">Kein Bereich</option>` + MESK.map(a => `<option value="${a.k}"${a.k===sel?" selected":""}>${esc(a.l)}</option>`).join("");
 
@@ -12906,47 +12904,63 @@ function renderSetup(){
     <p class="hint" style="margin:0">Das Kürzel steht bei jedem Eintrag, damit im Team sichtbar ist, wer etwas notiert hat.</p></section>`;
 }
 
+const SIT_WORDS = [["Ankommenszeit",["ankommen","ankommens","morgenkreis","heute morgen","beim reinkommen"]],["Pause",["pause","hof","schulhof","frühstück"]],
+  ["Sport",["sport","turnhalle","sporthalle","schwimmen"]],["Elterngespräch",["elterngespräch","mutter","vater","eltern"]],["Gespräch mit dem Kind",["gespräch mit","einzelgespräch","im gespräch"]],["Unterricht",["unterricht","stunde","arbeitsphase","mathe","deutsch","aufgabe"]]];
+function suggestSituation(text){ const t = String(text).toLowerCase(); let best = null, pos = Infinity;
+  for (const [sit, ws] of SIT_WORDS) for (const w of ws) { const i = t.indexOf(w); if (i >= 0 && i < pos) { pos = i; best = sit; } }
+  return best || "Sonstiges"; }
+function analyse(raw, fixedKind){
+  const d = detectKind(raw);
+  const kind = d && !d.tie ? d.kind : (fixedKind ? S.kinder.find(k => k.id === fixedKind) : null);
+  const m = suggestMesk(stripNames(raw));
+  return { kind, d, mesk: m ? m.k : "", hits: m ? m.hits : [], situation: suggestSituation(raw) };
+}
 function captureHtml(fixedKind){
   const kinder = aktiveKinder();
-  const opts = kinder.map(k => `<option value="${esc(k.id)}"${k.id===fixedKind?" selected":""}>${esc(k.kuerzel)}${rufnamen(k).length?" ("+esc(rufnamen(k)[0])+")":""}${k.klasse?" · "+esc(k.klasse):""}</option>`).join("");
+  const ohneRuf = kinder.filter(k => !rufnamen(k).length && !k.beispiel).length;
+  const pick = S.pick ? `<div class="msg" style="margin-top:10px"><b>${S.pick.tie ? `„${esc(S.pick.tie)}“ passt zu mehreren Kindern.` : "Kein Kind im Text erkannt."}</b> Für wen ist der Eintrag?
+      <div class="row" style="margin-top:8px">${kinder.map(k => `<button class="btn" data-pick="${esc(k.id)}">${esc(k.kuerzel)}${rufnamen(k).length ? " · " + esc(rufnamen(k)[0]) : ""}</button>`).join("")}
+      <button class="btn ghost" data-pick-cancel>Abbrechen</button></div></div>` : "";
   return `<section class="panel" aria-labelledby="capH"><h2 id="capH">Neue Beobachtung</h2>
-    ${kinder.length ? "" : `<div class="hint">Lege zuerst unten ein Kind an.</div>`}
-    <div class="row">
-      <div class="field"><label for="cKind">Kind</label><select id="cKind">${opts || `<option value="">–</option>`}</select></div>
-      <div class="field"><label for="cSit">Situation</label><select id="cSit">${SITUATIONEN.map(s => `<option>${s}</option>`).join("")}</select></div>
-      <div class="field"><label for="cWhen">Zeitpunkt</label><input type="datetime-local" id="cWhen"></div>
-    </div>
-    <div class="field"><label for="cText">Beobachtung</label>
-      <textarea id="cText" placeholder="Tippen oder über das Mikrofon der Tastatur diktieren, z. B.: Ali hat in der Ankommenszeit von sich aus ein anderes Kind gefragt, ob sie zusammen malen. Mit Rufname wird das Kind automatisch erkannt."></textarea></div>
-    <div class="row">
-      <div class="field" style="flex:2 1 260px"><label for="cMesk">MesK-Bereich</label><select id="cMesk">${meskOptions("")}</select></div>
-      <button class="btn primary" id="cSave" ${kinder.length?"":"disabled"}>Speichern</button>
-    </div>
+    ${kinder.length ? "" : `<div class="hint">Lege zuerst unten ein Kind an (mit Rufname).</div>`}
+    <div class="field"><label for="cText" class="sr-only">Beobachtung</label>
+      <textarea id="cText" style="min-height:120px" placeholder="Einfach diktieren, z. B.: „Ali hat in der Pause einem anderen Kind den Ball weggenommen und war danach sehr wütend.“ – Kind und MesK-Bereich erkennt die App selbst."></textarea></div>
     <div class="suggest" id="cSuggest" aria-live="polite"></div>
+    <div class="row" style="margin-top:8px"><button class="btn primary" id="cSave" ${kinder.length?"":"disabled"} data-fixed="${esc(fixedKind||"")}">Speichern</button></div>
+    ${pick}
+    ${ohneRuf ? `<div class="hint" style="margin-top:8px">${ohneRuf} ${ohneRuf === 1 ? "Kind hat" : "Kinder haben"} noch keinen Rufnamen – diese Kinder kann die App nicht erkennen. Rufname eintragen: Kind antippen → „Rufname / Klasse ändern“.</div>` : ""}
   </section>`;
 }
 function initCapture(){
   if (!$("cText")) return;
-  $("cWhen").value = localInput(new Date());
-  S.manualMesk = false; S.manualKind = false;
-  $("cKind").addEventListener("change", () => { S.manualKind = true; updateSuggestion(); });
   let t;
   $("cText").addEventListener("input", () => { clearTimeout(t); t = setTimeout(updateSuggestion, 250); });
-  $("cMesk").addEventListener("change", () => { S.manualMesk = true; });
 }
 function updateSuggestion(){
   if (!$("cText") || !$("cSuggest")) return;
   const raw = $("cText").value, box = $("cSuggest");
-  let kindLine = "";
-  const d = detectKind(raw);
-  if (d && d.tie) kindLine = `<div>Der Name „${esc(d.name)}“ passt zu mehreren Kindern – bitte oben das Kind wählen.</div>`;
-  else if (d) { if (!S.manualKind && $("cKind").value !== d.kind.id) $("cKind").value = d.kind.id;
-    kindLine = $("cKind").value === d.kind.id ? `<div>Kind erkannt: <b>${esc(d.kind.kuerzel)}</b> <span>(„${esc(d.name)}“)</span></div>` : `<div>Im Text steht zuerst „${esc(d.name)}“ (${esc(d.kind.kuerzel)}) – du hast ein anderes Kind gewählt.</div>`; }
-  const s = suggestMesk(stripNames(raw));
-  if (!s) { box.innerHTML = kindLine + (raw.trim() ? "<div>Kein MesK-Vorschlag erkannt. Bitte Bereich selbst wählen.</div>" : ""); if (!S.manualMesk) $("cMesk").value = ""; return; }
-  if (!S.manualMesk) $("cMesk").value = s.k;
-  const a = area(s.k);
-  box.innerHTML = kindLine + `<div><i class="sw g-${a.g}"></i>Vorschlag: <b>${esc(a.s)}</b> <span>(erkannt: ${esc(s.hits.slice(0,3).join(", "))})</span></div>`;
+  if (!raw.trim()) { box.innerHTML = ""; return; }
+  const fixed = $("cSave")?.dataset.fixed || null;
+  const r = analyse(raw, fixed);
+  const kindTxt = r.d && r.d.tie ? `„${esc(r.d.name)}“ passt zu mehreren Kindern` : r.kind ? `<b>${esc(r.kind.kuerzel)}</b>${r.d ? ` („${esc(r.d.name)}“)` : ""}` : "noch kein Kind erkannt";
+  const a = area(r.mesk);
+  box.innerHTML = `Wird gespeichert bei: ${kindTxt} · ${a ? `<i class="sw g-${a.g}"></i><b>${esc(a.s)}</b>` : "ohne MesK-Bereich"} · ${esc(r.situation)}`;
+}
+function miniEntry(e){
+  const a = area(e.mesk), kinder = aktiveKinder();
+  return `<article class="entry" style="border-left-color:${a ? `var(--g-${a.g})` : "var(--line)"}">
+    <div class="h"><span class="when">${esc(fmtDate(e.ts))} · ${esc(e.von || "")}</span><span class="tag">${esc(e.situation)}</span></div>
+    <div class="txt">${esc(e.text)}</div>
+    <div class="f" style="flex-wrap:wrap;gap:6px"><select data-kindsel="${esc(e.id)}" aria-label="Kind">${kinder.map(k => `<option value="${esc(k.id)}"${k.id===e.kindId?" selected":""}>${esc(k.kuerzel)}${rufnamen(k).length ? " · " + esc(rufnamen(k)[0]) : ""}</option>`).join("")}</select>
+      <select data-mesk="${esc(e.id)}" aria-label="MesK-Bereich">${meskOptions(e.mesk)}</select>
+      <button class="btn ghost" data-edit-go="${esc(e.id)}">Text bearbeiten</button></div></article>`;
+}
+function recentHtml(){
+  const mine = S.eintraege.filter(e => !e.geloescht && e.von === (S.meta.lehrkraft || "")).sort((a,b) => (b.erstellt||"").localeCompare(a.erstellt||"")).slice(0, 3);
+  if (!mine.length) return "";
+  return `<section class="panel"><h3>Zuletzt gespeichert</h3>
+    <p class="hint" style="margin:0 0 6px">Falsch zugeordnet? Kind oder MesK-Bereich hier direkt ändern.</p>
+    <div class="timeline">${mine.map(miniEntry).join("")}</div></section>`;
 }
 
 function renderHome(){
@@ -12966,7 +12980,7 @@ function renderHome(){
   const sichAlt = !S.meta.letzteSicherung || Date.now() - new Date(S.meta.letzteSicherung) > 7*864e5;
   const backupHint = echte && sichAlt ? `<div class="msg row" style="align-items:center;justify-content:space-between;margin-bottom:10px"><span>${S.meta.letzteSicherung ? `Letzte Sicherung ${daysAgo(S.meta.letzteSicherung)}.` : "Noch keine Sicherung gespeichert."} Einmal pro Woche sichern schützt vor Datenverlust.</span>
     ${S.meta.teampw ? `<button class="btn" data-backup>Jetzt sichern</button>` : `<button class="btn" data-nav="sync">Team-Passwort festlegen</button>`}</div>` : "";
-  return `${captureHtml(null)}
+  return `${captureHtml(null)}${recentHtml()}
     <section class="panel">
       <div class="row" style="justify-content:space-between;align-items:baseline"><h2>Kinder</h2>
         <span class="hint">${S.eintraege.filter(e => !e.geloescht && new Date(e.ts) >= weekAgo).length} Einträge in 7 Tagen · ${offen} ohne Bereich · ${letzter}</span></div>
@@ -13000,14 +13014,15 @@ function renderKind(){
         <div class="row"><div class="field"><label for="eWhen">Zeitpunkt</label><input type="datetime-local" id="eWhen" value="${localInput(new Date(e.ts))}"></div>
           <div class="field"><label for="eSit">Situation</label><select id="eSit">${SITUATIONEN.map(x => `<option${x===e.situation?" selected":""}>${x}</option>`).join("")}</select></div></div>
         <div class="field"><label for="eText">Beobachtung</label><textarea id="eText">${esc(e.text)}</textarea></div>
-        <div class="field"><label for="eMesk">MesK-Bereich</label><select id="eMesk">${meskOptions(e.mesk)}</select></div>
+        <div class="row"><div class="field"><label for="eKind">Kind</label><select id="eKind">${aktiveKinder().map(x => `<option value="${esc(x.id)}"${x.id===e.kindId?" selected":""}>${esc(x.kuerzel)}${rufnamen(x).length ? " · " + esc(rufnamen(x)[0]) : ""}</option>`).join("")}</select></div>
+          <div class="field" style="flex:2 1 220px"><label for="eMesk">MesK-Bereich</label><select id="eMesk">${meskOptions(e.mesk)}</select></div></div>
         <div class="row"><button class="btn primary" type="submit">Änderung speichern</button><button class="btn" type="button" data-edit-cancel>Abbrechen</button></div>
       </form></article>`;
     return `${mh}<article class="entry" style="border-left-color:${a ? `var(--g-${a.g})` : "var(--line)"}">
       <div class="h"><span class="when">${esc(fmtDate(e.ts))} · ${esc(e.von || "")}</span><span class="tag">${esc(e.situation)}</span></div>
       <div class="txt">${esc(e.text)}</div>
       ${e.bearbeitet ? `<div class="edited">bearbeitet ${esc(new Date(e.bearbeitet).toLocaleDateString("de-DE"))}${e.bearbeitetVon ? " von " + esc(e.bearbeitetVon) : ""}</div>` : ""}
-      <div class="f"><select data-mesk="${esc(e.id)}" aria-label="MesK-Bereich">${meskOptions(e.mesk)}</select>
+      <div class="f" style="flex-wrap:wrap;gap:6px"><span style="display:flex;gap:6px;flex-wrap:wrap"><select data-kindsel="${esc(e.id)}" aria-label="Kind">${aktiveKinder().map(x => `<option value="${esc(x.id)}"${x.id===e.kindId?" selected":""}>${esc(x.kuerzel)}</option>`).join("")}</select><select data-mesk="${esc(e.id)}" aria-label="MesK-Bereich">${meskOptions(e.mesk)}</select></span>
       ${S.confirm === e.id ? `<span class="conf">Löschen? <button class="btn ghost danger" data-del-yes="${esc(e.id)}">Ja, löschen</button><button class="btn ghost" data-del-no>Abbrechen</button></span>`
                            : `<span><button class="btn ghost" data-edit="${esc(e.id)}">Bearbeiten</button><button class="btn ghost" data-del="${esc(e.id)}">Löschen</button></span>`}</div></article>`; }).join("");
   return `<div><button class="btn ghost" data-home>← Alle Kinder</button></div>
@@ -13146,7 +13161,7 @@ function renderSettings(){
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
 const MSG_CHUNK = 2800;
-const APP_VERSION = "15";
+const APP_VERSION = "16";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -13310,7 +13325,11 @@ document.addEventListener("click", async ev => {
   if ("home" in d) { S.view = "home"; render(); return; }
   if (d.filter) { S.filter = d.filter; render(); return; }
   if ("sort" in d) { S.asc = !S.asc; render(); return; }
-  if (b.id === "cSave") return saveEntry();
+  if (b.id === "cSave") { S.pick = null; return saveEntry(); }
+  if (d.pick) return saveEntry(d.pick);
+  if ("pickCancel" in d) { const t = S.pick?.text || ""; S.pick = null; render(); if ($("cText")) { $("cText").value = t; updateSuggestion(); } return; }
+  if (d.editGo) { const e = S.eintraege.find(x => x.id === d.editGo); if (!e) return; S.view = "kind"; S.kindId = e.kindId; S.filter = "all"; S.edit = e.id; S.kEdit = false; render();
+    document.getElementById("editForm")?.scrollIntoView({ block:"center" }); $("eText")?.focus(); return; }
   if (d.edit) { S.edit = d.edit; S.confirm = null; render(); $("eText")?.focus(); return; }
   if ("editCancel" in d) { S.edit = null; render(); return; }
   if (d.del) { S.confirm = d.del; render(); return; }
@@ -13386,6 +13405,9 @@ document.addEventListener("click", async ev => {
 });
 document.addEventListener("change", async ev => {
   const t = ev.target; if (S.locked) { if (t.type === "file") t.value = ""; return; }
+  if (t.dataset.kindsel) { const e = S.eintraege.find(x => x.id === t.dataset.kindsel); const k = S.kinder.find(x => x.id === t.value);
+    await putMany("eintraege", [{ ...e, kindId:t.value, geaendert:nowIso(), bearbeitet:nowIso(), bearbeitetVon:S.meta.lehrkraft || "" }]); await load();
+    if (S.view === "kind" && S.kindId !== t.value) { render(); flash(`Eintrag zu ${k.kuerzel} verschoben`); } else { render(); flash(`Eintrag jetzt bei ${k.kuerzel}`); } return; }
   if (t.dataset.mesk) { const e = S.eintraege.find(x => x.id === t.dataset.mesk); await putMany("eintraege", [{...e, mesk:t.value, geaendert:nowIso()}]); await load(); render(); return; }
   if (t.id === "pwShow") { for (const id of ["pw1","pw1b","pw2"]) { const el = $(id); if (el) el.type = t.checked ? "text" : "password"; } return; }
   if (t.id === "scanIn" && t.files[0]) {
@@ -13440,7 +13462,7 @@ document.addEventListener("submit", async ev => {
   if (f.id === "editForm") { const e = S.eintraege.find(x => x.id === f.dataset.id); const text = $("eText").value.trim();
     if (!text) { flash("Der Text darf nicht leer sein.", true); return; }
     const when = $("eWhen").value ? new Date($("eWhen").value).toISOString() : e.ts;
-    await putMany("eintraege", [{ ...e, text:namesToKuerzel(text), situation:$("eSit").value, mesk:$("eMesk").value, ts:when, geaendert:nowIso(), bearbeitet:nowIso(), bearbeitetVon:S.meta.lehrkraft || "" }]);
+    await putMany("eintraege", [{ ...e, kindId:$("eKind")?.value || e.kindId, text:namesToKuerzel(text), situation:$("eSit").value, mesk:$("eMesk").value, ts:when, geaendert:nowIso(), bearbeitet:nowIso(), bearbeitetVon:S.meta.lehrkraft || "" }]);
     await load(); S.edit = null; render(); flash("Änderung gespeichert. Sie wird beim nächsten Abgleich übertragen."); return; }
   if (f.id === "redForm") { await setMeta("redact", $("redact").value); await load(); flash("Gespeichert."); return; }
   if (f.id === "pwForm") { const pw = $("pw1").value; if (pw.length < 10) { flash("Bitte mindestens 10 Zeichen verwenden.", true); return; }
@@ -13451,16 +13473,19 @@ document.addEventListener("submit", async ev => {
     await doImport(sealed, pw); return; }
 });
 
-async function saveEntry(){
-  const kindId = $("cKind").value, text = namesToKuerzel($("cText").value.trim());
-  if (!kindId) { flash("Bitte ein Kind wählen.", true); return; }
-  if (!text) { flash("Bitte eine Beobachtung eingeben.", true); return; }
-  const when = $("cWhen").value ? new Date($("cWhen").value) : new Date();
-  const e = { id:rid(), kindId, ts:when.toISOString(), situation:$("cSit").value, text, mesk:$("cMesk").value,
+async function saveEntry(forceKindId){
+  const raw = (S.pick ? S.pick.text : $("cText").value).trim();
+  if (!raw) { flash("Bitte eine Beobachtung eingeben.", true); return; }
+  const fixed = $("cSave")?.dataset.fixed || null;
+  const r = analyse(raw, fixed);
+  const kind = forceKindId ? S.kinder.find(k => k.id === forceKindId) : r.kind;
+  if (!kind) { S.pick = { text: raw, tie: r.d && r.d.tie ? r.d.name : null }; render(); if ($("cText")) $("cText").value = raw; return; }
+  const e = { id:rid(), kindId:kind.id, ts:nowIso(), situation:r.situation, text:namesToKuerzel(raw), mesk:r.mesk,
               von:S.meta.lehrkraft || "", erstellt:nowIso(), geaendert:nowIso(), geloescht:false };
   await putMany("eintraege", [e]); await load();
-  const k = S.kinder.find(x => x.id === kindId);
-  S.clearDraft = true; render(); flash(`Im Logbuch ${k ? k.kuerzel : ""} gespeichert.`);
+  S.pick = null; S.clearDraft = true; render();
+  const a = area(e.mesk);
+  flash(`Gespeichert bei ${kind.kuerzel} – ${a ? a.s : "ohne MesK-Bereich"}. Falls falsch: ${S.view === "home" ? "unten bei „Zuletzt gespeichert“" : "unten im Verlauf"} ändern.`);
 }
 
 async function copyText(ta, btn){
