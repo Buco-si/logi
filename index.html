@@ -13101,7 +13101,7 @@ function renderSync(){
         <label class="btn" for="scanIn" style="display:inline-block">QR-Code fotografieren</label>
         <input type="file" id="scanIn" accept="image/*" capture="environment" hidden>
         <label class="btn" for="fileIn" style="display:inline-block">Datei öffnen</label>
-        <input type="file" id="fileIn" accept=".lbe,.txt,text/plain" hidden>
+        <input type="file" id="fileIn" hidden>
         ${sc.total ? `<button class="btn ghost" data-scan-reset>Neu beginnen</button>` : ""}
       </div>
       ${prog}
@@ -13113,13 +13113,46 @@ function renderSync(){
     </section>`;
 }
 
+/* Datenprüfung: zählt, was wirklich in der Datenbank liegt */
+async function runCheck(){
+  const out = {};
+  for (const st of ["kinder","eintraege"]) {
+    const raw = await getAllRaw(st); let ok = 0, del = 0, bad = 0; const delList = [];
+    for (const r of raw) {
+      let v = r;
+      if (r.enc) { if (!LOCK.key) { bad++; continue; } try { v = await decWith(LOCK, r.enc); } catch(_) { bad++; continue; } }
+      if (v.geloescht) { del++; if (st === "kinder") delList.push(v); } else ok++;
+    }
+    out[st] = { total: raw.length, ok, del, bad, delList };
+  }
+  let persisted = null; try { persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : null; } catch(_) {}
+  out.persisted = persisted; out.pin = !!S.meta.lock;
+  S.check = out; render();
+}
+function checkPanel(){
+  const c = S.check;
+  const pers = c && c.persisted === false ? `<div class="warnbox" style="margin-top:8px">Der Browser hat <b>nicht</b> zugesagt, die Daten dauerhaft aufzubewahren. Er könnte sie bei Speichermangel löschen. Tipp: App über das Symbol auf dem Startbildschirm nutzen, regelmäßig abgleichen und sichern.</div>` : "";
+  return `<section class="panel"><h3>Datenprüfung</h3>
+    <p class="hint" style="margin:0 0 8px">Zeigt, was tatsächlich auf diesem Gerät gespeichert ist – auch gelöschte Kinder.</p>
+    <div class="row"><button class="btn" data-check>Daten prüfen</button></div>
+    ${c ? `<ul class="steps" style="list-style:disc;margin-top:8px">
+      <li>Kinder: <b>${c.kinder.ok}</b> aktiv, <b>${c.kinder.del}</b> als gelöscht markiert${c.kinder.bad ? `, <b>${c.kinder.bad}</b> nicht lesbar` : ""}</li>
+      <li>Einträge: <b>${c.eintraege.ok}</b> aktiv, <b>${c.eintraege.del}</b> gelöscht${c.eintraege.bad ? `, <b>${c.eintraege.bad}</b> nicht lesbar` : ""}</li>
+      <li>PIN-Sperre: ${c.pin ? "ein" : "aus"} · Dauerhafter Speicher: ${c.persisted === true ? "ja" : c.persisted === false ? "nein" : "unbekannt"}</li></ul>
+      ${c.kinder.delList.length ? `<div class="msg" style="margin-top:8px">Gelöschte Kinder: ${c.kinder.delList.map(k => `<b>${esc(k.kuerzel)}</b>${k.rufname ? " (" + esc(k.rufname) + ")" : ""}${k.beispiel ? " – Beispiel" : ""}`).join(", ")}
+        <div class="row" style="margin-top:8px"><button class="btn primary" data-undelete>Gelöschte Kinder wiederherstellen</button></div>
+        <div class="hint">Ihre gelöschten Einträge lassen sich nicht zurückholen – nur das Kind mit Kürzel und Rufname.</div></div>` : ""}
+      ${c.kinder.bad || c.eintraege.bad ? `<div class="warnbox" style="margin-top:8px">Einige Datensätze lassen sich mit der aktuellen PIN nicht entschlüsseln. Bitte nichts löschen und mir diese Zahlen schicken.</div>` : ""}
+      ${pers}` : ""}
+  </section>`;
+}
 function backupPanel(){
   const pwSet = !!S.meta.teampw, last = S.meta.letzteSicherung;
   return `<section class="panel" id="backupPanel"><h3>Datensicherung</h3>
       <p style="margin:0 0 8px">${last ? `Letzte Sicherung: <b>${daysAgo(last)}</b> (${new Date(last).toLocaleDateString("de-DE")})` : "<b>Noch keine Sicherung gespeichert.</b>"}</p>
       <div class="row"><button class="btn primary" data-backup ${pwSet ? "" : "disabled"}>Sicherung jetzt speichern</button>
         <label class="btn" for="restoreIn" style="display:inline-block">Sicherung wiederherstellen …</label>
-        <input type="file" id="restoreIn" accept=".lbe,.txt,text/plain" hidden></div>
+        <input type="file" id="restoreIn" hidden></div>
       ${pwSet ? "" : `<div class="hint">Zuerst unter „Abgleich“ das Team-Passwort festlegen – damit wird die Sicherung verschlüsselt.</div>`}
       <ul class="steps" style="list-style:disc;margin-top:8px">
         <li>Die Sicherung enthält <b>alle</b> Kinder, Einträge, Änderungen und Löschungen sowie die Anonymisierungs-Liste – verschlüsselt mit dem Team-Passwort.</li>
@@ -13145,6 +13178,7 @@ function renderSettings(){
         <textarea id="redact" style="min-height:70px" placeholder="z. B. Vornamen von Integrationskräften, Geschwistern, Orte, Einrichtungen">${esc(S.meta.redact||"")}</textarea>
         <div class="row" style="margin-top:8px"><button class="btn" type="submit">Speichern</button></div></form>
       <p class="hint" style="margin:0">Diese Wörter werden im anonymisierten Text durch „[Person]“ ersetzt. Die Liste bleibt auf diesem Gerät.</p></section>
+    ${checkPanel()}
     ${pinPanel()}
     ${backupPanel()}
     <section class="panel"><h3>Speicherort und Datenschutz</h3>
@@ -13165,7 +13199,7 @@ function renderSettings(){
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
 const MSG_CHUNK = 2800;
-const APP_VERSION = "17";
+const APP_VERSION = "19";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -13324,7 +13358,7 @@ async function doImport(sealed, pw){
 /* ================= Ereignisse ================= */
 document.addEventListener("click", async ev => {
   const b = ev.target.closest("button"); if (!b) return; const d = b.dataset;
-  if (d.nav) { S.view = d.nav; S.confirm = null; stopAuto(); stopLive(); S.qr = null; S.msg = null; render(); window.scrollTo({top:0}); return; }
+  if (d.nav) { S.check = null; S.view = d.nav; S.confirm = null; stopAuto(); stopLive(); S.qr = null; S.msg = null; render(); window.scrollTo({top:0}); return; }
   if (d.kind) { S.kEdit = false; S.view = "kind"; S.kindId = d.kind; S.filter = "all"; S.confirm = null; S.edit = null; render(); window.scrollTo({top:0}); return; }
   if ("home" in d) { S.view = "home"; render(); return; }
   if (d.filter) { S.filter = d.filter; render(); return; }
@@ -13355,6 +13389,11 @@ document.addEventListener("click", async ev => {
     await tx("meta","readwrite",s => s.clear()); LOCK.key = null; LOCK.hkey = null; S.meta = {}; await load(); S.confirm = null; S.view = "home"; render(); flash("Alle Daten auf diesem Gerät wurden gelöscht."); return; }
   if ("demo" in d) return loadDemo();
   if ("lockNow" in d) return lockNow();
+  if ("check" in d) return runCheck();
+  if ("undelete" in d) { const list = (S.check?.kinder.delList || []).filter(k => !k.beispiel); const t = nowIso();
+    if (!list.length) { flash("Es gibt nur gelöschte Beispielkinder – die bleiben gelöscht."); return; }
+    await putMany("kinder", list.map(k => ({ ...k, geloescht:false, geaendert:t }))); await load(); S.check = null; render();
+    flash(`${list.length} ${list.length === 1 ? "Kind" : "Kinder"} wiederhergestellt: ${list.map(k => k.kuerzel).join(", ")}`); return; }
   if (d.pinMode !== undefined) { S.pinMode = d.pinMode || null; render(); $("pinOld")?.focus(); return; }
   if ("reset" in d) { S.confirm = "reset"; render(); document.querySelector("details")?.setAttribute("open",""); return; }
   if ("resetYes" in d) { await tx("kinder","readwrite",s => s.clear()); await tx("eintraege","readwrite",s => s.clear()); await tx("meta","readwrite",s => s.clear());
