@@ -12742,6 +12742,7 @@ async function load(){
     await putMany("kinder", ph); S.kinder = await getAll("kinder");
   }
   const m = await getAll("meta"); S.meta = Object.fromEntries(m.map(x => [x.k, x.v]));
+  scheduleAutoBackup();
 }
 async function loadMetaRaw(){ const m = await getAllRaw("meta"); return Object.fromEntries(m.filter(x => !x.enc).map(x => [x.k, x.v])); }
 const aktiveKinder = () => S.kinder.filter(k => !k.geloescht).sort((a,b) => a.kuerzel.localeCompare(b.kuerzel,"de"));
@@ -12901,7 +12902,13 @@ function renderSetup(){
       <div class="field"><label for="setupKz">Dein Kürzel als Lehrkraft</label><input type="text" id="setupKz" maxlength="8" placeholder="z. B. MB"></div>
       <button class="btn primary" type="submit">Los geht's</button>
     </form>
-    <p class="hint" style="margin:0">Das Kürzel steht bei jedem Eintrag, damit im Team sichtbar ist, wer etwas notiert hat.</p></section>`;
+    <p class="hint" style="margin:0">Das Kürzel steht bei jedem Eintrag, damit im Team sichtbar ist, wer etwas notiert hat.</p></section>
+    ${S.pendingImport ? `<section class="panel"><h3>Sicherung entschlüsseln</h3><form class="row" id="pwAsk" autocomplete="off"><div class="field"><label for="pw2">Team-Passwort</label><input type="password" id="pw2"></div><button class="btn primary" type="submit">Wiederherstellen</button></form>
+      <label class="hint" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="pwSave" checked> Als Team-Passwort speichern</label></section>` :
+    `<section class="panel"><h3>Logbuch zurückholen?</h3>
+      <p class="hint" style="margin:0 0 8px">Neues Handy, App neu installiert oder Daten verschwunden? Hol dir dein Logbuch aus einer Sicherung zurück${NATIVE ? ` (Ordner „Dokumente/${BK_DIR}“)` : ""} – oder lass dir von der Kollegin einen Abgleich mit „Alles“ schicken.</p>
+      <div class="row">${S.autoFound ? `<button class="btn primary" data-restore-auto>Automatische Sicherung vom ${esc(S.autoFound)} wiederherstellen</button>` : ""}
+        <label class="btn" for="restoreIn" style="display:inline-block">Sicherung wiederherstellen …</label><input type="file" id="restoreIn" hidden></div></section>`}`;
 }
 
 const SIT_WORDS = [["Ankommenszeit",["ankommen","ankommens","morgenkreis","heute morgen","beim reinkommen"]],["Pause",["pause","hof","schulhof","frühstück"]],
@@ -12977,8 +12984,8 @@ function renderHome(){
       <div class="t"><span class="meta">${es.length} Einträge${es[0] ? " · zuletzt " + daysAgo(es[0].ts) : ""}</span>${woche ? `<span class="wk">+${woche} diese Woche</span>` : ""}</div></button>`; }).join("");
   const letzter = S.meta.letzterAbgleich ? `Letzter Abgleich: ${daysAgo(S.meta.letzterAbgleich)}` : "Noch kein Abgleich";
   const echte = S.eintraege.some(e => !e.geloescht && !aktiveKinder().find(k => k.id === e.kindId)?.beispiel);
-  const sichAlt = !S.meta.letzteSicherung || Date.now() - new Date(S.meta.letzteSicherung) > 7*864e5;
-  const backupHint = echte && sichAlt ? `<div class="msg row" style="align-items:center;justify-content:space-between;margin-bottom:10px"><span>${S.meta.letzteSicherung ? `Letzte Sicherung ${daysAgo(S.meta.letzteSicherung)}.` : "Noch keine Sicherung gespeichert."} Einmal pro Woche sichern schützt vor Datenverlust.</span>
+  const sichAlt = NATIVE ? !S.meta.teampw : (!S.meta.letzteSicherung || Date.now() - new Date(S.meta.letzteSicherung) > 7*864e5);
+  const backupHint = echte && sichAlt ? `<div class="msg row" style="align-items:center;justify-content:space-between;margin-bottom:10px"><span>${NATIVE ? "Automatische Sicherung ist aus, weil noch kein Team-Passwort festgelegt ist." : `${S.meta.letzteSicherung ? `Letzte Sicherung ${daysAgo(S.meta.letzteSicherung)}.` : "Noch keine Sicherung gespeichert."} Einmal pro Woche sichern schützt vor Datenverlust.`}</span>
     ${S.meta.teampw ? `<button class="btn" data-backup>Jetzt sichern</button>` : `<button class="btn" data-nav="sync">Team-Passwort festlegen</button>`}</div>` : "";
   return `${captureHtml(null)}${recentHtml()}
     <section class="panel">
@@ -13093,8 +13100,8 @@ function renderSync(){
     <section class="panel"><h3>Empfangen</h3>
       <div class="field"><label for="pasteIn">Abgleich-Nachricht einfügen</label>
         <textarea id="pasteIn" style="min-height:80px" placeholder="Nachricht im Messenger oder in der Mail lange antippen → Kopieren, dann hier lange antippen → Einfügen"></textarea></div>
-      <div class="row" style="margin-top:8px">${navigator.clipboard?.readText ? `<button class="btn primary" data-clip>Aus Zwischenablage einlesen</button>` : ""}
-        <button class="btn ${navigator.clipboard?.readText ? "" : "primary"}" data-paste>Eingefügten Text einlesen</button></div>
+      <div class="row" style="margin-top:8px">${NATIVE || navigator.clipboard?.readText ? `<button class="btn primary" data-clip>Aus Zwischenablage einlesen</button>` : ""}
+        <button class="btn ${NATIVE || navigator.clipboard?.readText ? "" : "primary"}" data-paste>Eingefügten Text einlesen</button></div>
       <div class="hint" style="margin-top:12px">Oder per QR-Code bzw. Datei:</div>
       <div class="row">
         ${navigator.mediaDevices?.getUserMedia ? `<button class="btn primary" data-scan-live>Mit Kamera scannen</button>` : ""}
@@ -13148,7 +13155,11 @@ function checkPanel(){
 }
 function backupPanel(){
   const pwSet = !!S.meta.teampw, last = S.meta.letzteSicherung;
-  return `<section class="panel" id="backupPanel"><h3>Datensicherung</h3>
+  const au = S.auto;
+  const autoBox = !NATIVE ? "" : !pwSet ? `<div class="warnbox" style="margin-bottom:8px"><b>Automatische Sicherung ist aus:</b> Bitte unter „Abgleich“ das Team-Passwort festlegen – damit wird die Sicherung verschlüsselt.</div>`
+    : au && au.err && au.err !== "pw" ? `<div class="warnbox" style="margin-bottom:8px">Automatische Sicherung fehlgeschlagen: ${esc(au.err)}</div>`
+    : `<div class="msg" style="margin-bottom:8px">✓ <b>Automatische Sicherung ist an.</b> Nach jeder Änderung wird verschlüsselt in „Dokumente/${BK_DIR}“ gesichert (eine Datei pro Tag, die letzten 30 bleiben).${au && au.ok ? ` Zuletzt: ${new Date(au.when).toLocaleString("de-DE")}.` : ""}</div>`;
+  return `<section class="panel" id="backupPanel"><h3>Datensicherung</h3>${autoBox}
       <p style="margin:0 0 8px">${last ? `Letzte Sicherung: <b>${daysAgo(last)}</b> (${new Date(last).toLocaleDateString("de-DE")})` : "<b>Noch keine Sicherung gespeichert.</b>"}</p>
       <div class="row"><button class="btn primary" data-backup ${pwSet ? "" : "disabled"}>Sicherung jetzt speichern</button>
         <label class="btn" for="restoreIn" style="display:inline-block">Sicherung wiederherstellen …</label>
@@ -13156,7 +13167,7 @@ function backupPanel(){
       ${pwSet ? "" : `<div class="hint">Zuerst unter „Abgleich“ das Team-Passwort festlegen – damit wird die Sicherung verschlüsselt.</div>`}
       <ul class="steps" style="list-style:disc;margin-top:8px">
         <li>Die Sicherung enthält <b>alle</b> Kinder, Einträge, Änderungen und Löschungen sowie die Anonymisierungs-Liste – verschlüsselt mit dem Team-Passwort.</li>
-        <li>Sie landet im Ordner „Downloads“. Von dort am besten auf einen geschützten Speicher kopieren (z. B. LOGINEO-Cloud oder verschlüsselter USB-Stick).</li>
+        <li>${NATIVE ? `Sie landet im Ordner „Dokumente/${BK_DIR}“.` : "Sie landet im Ordner „Downloads“."} Von dort ab und zu auf einen geschützten Speicher kopieren (z. B. LOGINEO-Cloud oder verschlüsselter USB-Stick).</li>
         <li>Wiederherstellen <b>ergänzt</b> die vorhandenen Daten (es wird nichts überschrieben, was neuer ist). Funktioniert auch auf einem neuen Handy oder am PC.</li>
         <li>Ohne das Team-Passwort ist die Sicherung nicht lesbar – Passwort gut merken.</li></ul></section>`;
 }
@@ -13167,7 +13178,7 @@ async function doBackup(){
     const sealed = await seal(p, S.meta.teampw);
     const name = `logbuch-sicherung_${(S.meta.lehrkraft||"").replace(/[^A-Za-z0-9]/g,"")}_${new Date().toLocaleDateString("sv-SE")}.txt`;
     if (await saveFile(name, sealed)) { await setMeta("letzteSicherung", nowIso()); await load(); render();
-      flash(`Sicherung mit ${aktiveKinder().length} Kindern und ${S.eintraege.filter(e => !e.geloescht).length} Einträgen gespeichert (Ordner „Downloads“, Datei ${name}).`); }
+      flash(`Sicherung mit ${aktiveKinder().length} Kindern und ${S.eintraege.filter(e => !e.geloescht).length} Einträgen gespeichert (${S.savedWhere}).`); }
   } catch (e) { flash("Die Sicherung konnte nicht erstellt werden (" + (e?.message || e) + ").", true); }
 }
 function renderSettings(){
@@ -13199,7 +13210,7 @@ function renderSettings(){
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
 const MSG_CHUNK = 2800;
-const APP_VERSION = "19";
+const APP_VERSION = "20";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -13290,7 +13301,52 @@ function addPart(text){
 }
 /* Abgleich-Link: Die Daten stehen hinter dem „#“ der Adresse. Dieser Teil wird vom Browser
    nie an den Server (GitHub) geschickt, er bleibt auf dem Gerät. */
+/* ================= Android-App (Capacitor) =================
+   In der App liegen die Daten im privaten App-Speicher. Zusätzlich schreibt die App nach jeder
+   Änderung automatisch eine verschlüsselte Sicherung in den Ordner Dokumente/LogbuchESE. */
+const LINK_BASE = "";            // wird beim App-Bau auf die GitHub-Adresse gesetzt
+const BK_DIR = "LogbuchESE";
+const NATIVE = (() => { try { const X = window.capacitorExports; if (!X || !X.Capacitor || !X.Capacitor.isNativePlatform()) return null;
+  const rp = X.registerPlugin; return { fs:rp("Filesystem"), share:rp("Share"), clip:rp("Clipboard"), app:rp("App") }; } catch(_) { return null; } })();
+const isCancel = e => e && (e.name === "AbortError" || /cancel|abgebrochen/i.test(String(e.message || e)));
+async function shareText(text){ if (NATIVE) return NATIVE.share.share({ text, dialogTitle:"Abgleich senden" }); return navigator.share({ text }); }
+const canShareText = () => !!(NATIVE || navigator.share);
+async function nativeWrite(name, data){
+  try { await NATIVE.fs.writeFile({ path:`${BK_DIR}/${name}`, data, directory:"DOCUMENTS", encoding:"utf8", recursive:true }); return name; }
+  catch(e) { const alt = name.replace(/\.txt$/, `_${new Date().toTimeString().slice(0,8).replace(/:/g,"")}.txt`);
+    await NATIVE.fs.writeFile({ path:`${BK_DIR}/${alt}`, data, directory:"DOCUMENTS", encoding:"utf8", recursive:true }); return alt; }
+}
+async function listAutoBackups(){
+  try { const r = await NATIVE.fs.readdir({ path:BK_DIR, directory:"DOCUMENTS" });
+    return (r.files || []).map(f => typeof f === "string" ? { name:f } : f).filter(f => /^logbuch-sicherung_.*\.txt$/.test(f.name))
+      .sort((a,b) => (b.mtime || 0) - (a.mtime || 0) || b.name.localeCompare(a.name)); } catch(_) { return []; }
+}
+let autoTimer = null;
+function scheduleAutoBackup(){ if (!NATIVE) return; clearTimeout(autoTimer); autoTimer = setTimeout(runAutoBackup, 2500); }
+async function runAutoBackup(){
+  if (!NATIVE || S.locked || !S.meta.lehrkraft) return;
+  if (!S.meta.teampw) { S.auto = { err:"pw" }; return; }
+  if (!S.kinder.length && !S.eintraege.length) return;
+  try {
+    const p = { ...buildPayload(null), sicherung:true, auto:true, einstellungen:{ redact:S.meta.redact || "" } };
+    const sig = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([p.kinder, p.eintraege, p.einstellungen, S.meta.teampw]))))).map(b => b.toString(16).padStart(2,"0")).join("");
+    if (sig === S.autoSig) return;
+    const sealed = await seal(p, S.meta.teampw);
+    const file = await nativeWrite(`logbuch-sicherung_${new Date().toLocaleDateString("sv-SE")}.txt`, sealed);
+    S.autoSig = sig; S.auto = { ok:true, when:nowIso(), file };
+    S.meta.letzteSicherung = S.auto.when; try { await putManyRaw("meta", [{ k:"letzteSicherung", v:S.auto.when }]); } catch(_) {}
+    const all = await listAutoBackups();
+    for (const f of all.slice(30)) { try { await NATIVE.fs.deleteFile({ path:`${BK_DIR}/${f.name}`, directory:"DOCUMENTS" }); } catch(_) {} }
+    const bp = $("backupPanel"); if (bp && S.view === "settings") bp.outerHTML = backupPanel();
+  } catch (e) { S.auto = { err:String(e?.message || e) }; }
+}
+async function restoreLatestAuto(){
+  const list = await listAutoBackups(); if (!list.length) { flash("Keine automatische Sicherung gefunden. Bitte „Sicherung wiederherstellen …“ nutzen.", true); return; }
+  try { const r = await NATIVE.fs.readFile({ path:`${BK_DIR}/${list[0].name}`, directory:"DOCUMENTS", encoding:"utf8" }); await importText(r.data); }
+  catch(e) { flash("Die Sicherung konnte nicht gelesen werden (" + (e?.message || e) + "). Bitte „Sicherung wiederherstellen …“ nutzen.", true); }
+}
 function appBase(){
+  if (NATIVE) return LINK_BASE;
   if (window.claude || !/^https?:$/.test(location.protocol)) return "";
   return location.origin + location.pathname;
 }
@@ -13299,8 +13355,11 @@ function restoreScan(){ try { const x = JSON.parse(localStorage.getItem("lbeScan
 async function handleLink(){
   const h = location.hash || "";
   if (!h.includes("LBE1:")) return;
-  const txt = decodeURIComponent(h.slice(1));
   try { history.replaceState(null, "", location.pathname + location.search); } catch(_) {}
+  await handleLinkText(decodeURIComponent(h.slice(1)));
+}
+async function handleUrl(url){ const i = String(url || "").indexOf("#"); if (i < 0 || !url.includes("LBE1:")) return; await handleLinkText(decodeURIComponent(url.slice(i + 1))); }
+async function handleLinkText(txt){
   if (S.locked || !S.meta.lehrkraft) { S.pendingLink = txt; flash(S.locked ? "Abgleich empfangen – bitte zuerst entsperren, dann wird er übernommen." : "Abgleich empfangen – bitte zuerst dein Kürzel eintragen."); return; }
   await importText(txt);
 }
@@ -13322,12 +13381,13 @@ async function importText(txt){
   return true;
 }
 async function copyPlain(t){
+  if (NATIVE) { try { await NATIVE.clip.write({ string:t }); return true; } catch(_) {} }
   try { await navigator.clipboard.writeText(t); return true; } catch(_) {}
   try { const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta); ta.select(); const ok = document.execCommand("copy"); ta.remove(); return ok; } catch(_) { return false; }
 }
 function drawMsg(){
   const m = S.msg, a = $("shareArea"); if (!m || !a) return;
-  const canShare = !!navigator.share;
+  const canShare = canShareText();
   a.innerHTML = `<div class="msg" style="margin-top:10px"><b>Abgleich mit ${m.count} Einträgen ist vorbereitet${m.parts.length > 1 ? ` – ${m.parts.length} Nachrichten, bitte alle nacheinander senden` : ""}.</b>
     ${m.parts.map((p,i) => `<div class="row" style="margin-top:8px;align-items:center">${m.parts.length > 1 ? `<span>Nachricht ${i+1}/${m.parts.length}${m.sent[i] ? " ✓" : ""}</span>` : ""}
       ${canShare ? `<button class="btn primary" data-msg-share="${i}">Teilen …</button>` : ""}<button class="btn" data-msg-copy="${i}">Kopieren</button></div>`).join("")}
@@ -13343,6 +13403,7 @@ async function doImport(sealed, pw){
   try {
     const p = await unseal(sealed, pw);
     const r = await mergePayload(p);
+    if (!S.meta.lehrkraft && p.von) await setMeta("lehrkraft", p.von);
     await setMeta("letzterAbgleich", nowIso()); await load();
     S.pendingImport = null; S.scan = { parts:{}, total:0, set:null }; saveScan();
     if (p.sicherung) { flash(`Sicherung vom ${new Date(p.erstellt).toLocaleDateString("de-DE")} (${p.von || "?"}) eingelesen: ${r.neu} Einträge wiederhergestellt, ${r.aktualisiert} aktualisiert, ${r.vorhanden} waren schon vorhanden${r.kinder ? `; ${r.kinder} Kinder wiederhergestellt` : ""}.`); render(); return; }
@@ -13390,6 +13451,7 @@ document.addEventListener("click", async ev => {
   if ("demo" in d) return loadDemo();
   if ("lockNow" in d) return lockNow();
   if ("check" in d) return runCheck();
+  if ("restoreAuto" in d) return restoreLatestAuto();
   if ("undelete" in d) { const list = (S.check?.kinder.delList || []).filter(k => !k.beispiel); const t = nowIso();
     if (!list.length) { flash("Es gibt nur gelöschte Beispielkinder – die bleiben gelöscht."); return; }
     await putMany("kinder", list.map(k => ({ ...k, geloescht:false, geaendert:t }))); await load(); S.check = null; render();
@@ -13411,7 +13473,7 @@ document.addEventListener("click", async ev => {
   if ("qrAuto" in d) { if (S.qr.auto) stopAuto(); else { S.qr.auto = true; S.autoTimer = setInterval(() => { if (!S.qr) return stopAuto(); S.qr.idx = (S.qr.idx + 1) % S.qr.parts.length; drawQr(); }, 1400); } drawQr(); return; }
   if ("scanLive" in d) return startLive();
   if ("paste" in d) { await importText($("pasteIn").value); return; }
-  if ("clip" in d) { let t = ""; try { t = await navigator.clipboard.readText(); } catch(_) {}
+  if ("clip" in d) { let t = ""; try { t = NATIVE ? (await NATIVE.clip.read()).value || "" : await navigator.clipboard.readText(); } catch(_) {}
     if (!t) { flash("Die Zwischenablage konnte nicht gelesen werden. Bitte den Text ins Feld einfügen (lange antippen → Einfügen) und „Eingefügten Text einlesen“ tippen.", true); $("pasteIn")?.focus(); return; }
     await importText(t); return; }
   if ("scanStop" in d) { stopLive(); render(); return; }
@@ -13423,15 +13485,15 @@ document.addEventListener("click", async ev => {
       ? `Logbuch-Abgleich von ${von}: ${x.count} Einträge${n > 1 ? ` (Teil ${i+1} von ${n})` : ""}. Zum Übernehmen antippen:\n${base}#LBE1:${set}:${i+1}/${n}:${c}.\n`
       : `Logbuch ESE – Abgleich von ${von}${n > 1 ? ` (Nachricht ${i+1} von ${n})` : ""}, ${x.count} Einträge.\nEinlesen: Nachricht kopieren → Logbuch-App → Abgleich → „Aus Zwischenablage einlesen“.\n\nLBE1:${set}:${i+1}/${n}:${c}.\n`);
     S.msg = { parts, sent: parts.map(() => false), count: x.count };
-    if (n === 1 && navigator.share) {   // ein Tipp: direkt das Teilen-Menü öffnen
-      try { await navigator.share({ text: parts[0] }); S.msg = null; await afterExport(); render(); flash(`Abgleich mit ${x.count} Einträgen gesendet.`); return; }
-      catch (e) { if (e && e.name === "AbortError") { S.msg = null; flash("Senden abgebrochen."); return; } }
+    if (n === 1 && canShareText()) {   // ein Tipp: direkt das Teilen-Menü öffnen
+      try { await shareText(parts[0]); S.msg = null; await afterExport(); render(); flash(`Abgleich mit ${x.count} Einträgen gesendet.`); return; }
+      catch (e) { if (isCancel(e)) { S.msg = null; flash("Senden abgebrochen."); return; } }
     }
     drawMsg(); $("shareArea")?.scrollIntoView({ behavior:"smooth", block:"center" }); return; }
   if (d.msgShare !== undefined) { const m = S.msg; if (!m) return; const i = +d.msgShare;
-    navigator.share({ text: m.parts[i] })
+    shareText(m.parts[i])
       .then(() => { m.sent[i] = true; drawMsg(); })
-      .catch(async e => { if (e && e.name === "AbortError") return; if (await copyPlain(m.parts[i])) { m.sent[i] = true; drawMsg(); flash("Teilen ging nicht – der Text ist stattdessen kopiert. Jetzt im Messenger einfügen."); } else flash("Teilen hat nicht geklappt (" + (e?.name || e) + ").", true); });
+      .catch(async e => { if (isCancel(e)) return; if (await copyPlain(m.parts[i])) { m.sent[i] = true; drawMsg(); flash("Teilen ging nicht – der Text ist stattdessen kopiert. Jetzt im Messenger einfügen."); } else flash("Teilen hat nicht geklappt (" + (e?.name || e) + ").", true); });
     return; }
   if (d.msgCopy !== undefined) { const m = S.msg; if (!m) return; const i = +d.msgCopy;
     if (await copyPlain(m.parts[i])) { m.sent[i] = true; drawMsg(); flash(`Kopiert${m.parts.length > 1 ? ` (Nachricht ${i+1} von ${m.parts.length})` : ""}. Jetzt im Messenger oder in der Mail einfügen und senden.`); }
@@ -13441,7 +13503,7 @@ document.addEventListener("click", async ev => {
   if ("sendFile" in d) { let x; try { x = await makeExport(); } catch (e) { flash("Die Datei konnte nicht erstellt werden (" + (e?.message || e) + ").", true); return; } if (!x) return;
     const name = `logbuch-abgleich_${(S.meta.lehrkraft||"").replace(/[^A-Za-z0-9]/g,"")}_${new Date().toLocaleDateString("sv-SE")}.txt`;
     const ok = await saveFile(name, x.sealed);
-    if (ok) { await afterExport(); render(); flash(`Abgleich-Datei mit ${x.count} Einträgen gespeichert (Ordner „Downloads“).`); } return; }
+    if (ok) { await afterExport(); render(); flash(`Abgleich-Datei mit ${x.count} Einträgen gespeichert (${S.savedWhere}).`); } return; }
   if ("anon" in d) { const k = S.kinder.find(x => x.id === S.kindId); const txt = buildAnon(k, $("aAuftrag").value, false);
     $("anonOut").innerHTML = txt ? `<div class="warnbox">Bitte vor dem Kopieren lesen: Stehen noch Namen, Orte, Daten oder auffällige Einzelheiten drin? Dann direkt im Feld ändern.</div>
       <textarea id="aText" aria-label="Anonymisierter Text">${esc(txt)}</textarea><div class="row"><button class="btn primary" data-anon-copy>Text kopieren</button><span class="hint">Danach in den Chat mit Claude einfügen.</span></div>`
@@ -13540,6 +13602,9 @@ async function copyText(ta, btn){
   catch(_) { ta.focus(); ta.select(); btn.textContent = "Markiert – jetzt kopieren"; }
 }
 async function saveFile(name, data){
+  if (NATIVE) { try { const f = await nativeWrite(name, data); S.savedWhere = `Ordner „Dokumente/${BK_DIR}“, Datei ${f}`; return true; }
+    catch(e) { flash("Speichern hat nicht geklappt (" + (e?.message || e) + ").", true); return false; } }
+  S.savedWhere = `Ordner „Downloads“, Datei ${name}`;
   try { const dl = window.claude?.use ? await window.claude.use("downloads") : null;
     if (dl) { await dl.save({ filename:name, data }); return true; } } catch(_) { return false; }
   try { const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], {type:"text/plain"})); a.download = name; document.body.appendChild(a); a.click(); a.remove(); return true; }
@@ -13573,7 +13638,12 @@ async function loadDemo(){
   restoreScan();
   render();
   await handleLink();
-  if ("serviceWorker" in navigator && location.protocol === "https:" && !window.claude) { navigator.serviceWorker.register("sw.js").catch(() => {}); }
+  if (NATIVE) {
+    try { const r = await NATIVE.app.getLaunchUrl(); if (r && r.url) await handleUrl(r.url); } catch(_) {}
+    try { NATIVE.app.addListener("appUrlOpen", ev => { handleUrl(ev && ev.url); }); } catch(_) {}
+    if (!S.meta.lehrkraft) { const l = await listAutoBackups(); if (l.length) { S.autoFound = (l[0].name.match(/\d{4}-\d{2}-\d{2}/) || [""])[0].split("-").reverse().join("."); render(); } }
+  }
+  if (!NATIVE && "serviceWorker" in navigator && location.protocol === "https:" && !window.claude) { navigator.serviceWorker.register("sw.js").catch(() => {}); }
   if (navigator.storage?.persist) navigator.storage.persist().catch(() => {});
 })();
 </script>
