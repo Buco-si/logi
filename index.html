@@ -12985,6 +12985,8 @@ function renderHome(){
   const letzter = S.meta.letzterAbgleich ? `Letzter Abgleich: ${daysAgo(S.meta.letzterAbgleich)}` : "Noch kein Abgleich";
   const echte = S.eintraege.some(e => !e.geloescht && !aktiveKinder().find(k => k.id === e.kindId)?.beispiel);
   const sichAlt = NATIVE ? !S.meta.teampw : (!S.meta.letzteSicherung || Date.now() - new Date(S.meta.letzteSicherung) > 7*864e5);
+  const abglAlt = !S.meta.letzterExport || Date.now() - new Date(S.meta.letzterExport) > 14*864e5;
+  const syncHint = echte && abglAlt ? `<div class="msg row" style="align-items:center;justify-content:space-between;margin-bottom:10px"><span>${S.meta.letzterExport ? `Dein letzter Abgleich war ${daysAgo(S.meta.letzterExport)}.` : "Du hast noch nie abgeglichen."} Regelmäßig abgleichen – dann sind die Einträge auch auf dem Handy der Kollegin gesichert.</span><button class="btn" data-nav="sync">Jetzt abgleichen</button></div>` : "";
   const backupHint = echte && sichAlt ? `<div class="msg row" style="align-items:center;justify-content:space-between;margin-bottom:10px"><span>${NATIVE ? "Automatische Sicherung ist aus, weil noch kein Team-Passwort festgelegt ist." : `${S.meta.letzteSicherung ? `Letzte Sicherung ${daysAgo(S.meta.letzteSicherung)}.` : "Noch keine Sicherung gespeichert."} Einmal pro Woche sichern schützt vor Datenverlust.`}</span>
     ${S.meta.teampw ? `<button class="btn" data-backup>Jetzt sichern</button>` : `<button class="btn" data-nav="sync">Team-Passwort festlegen</button>`}</div>` : "";
   return `${captureHtml(null)}${recentHtml()}
@@ -12992,7 +12994,7 @@ function renderHome(){
       <div class="row" style="justify-content:space-between;align-items:baseline"><h2>Kinder</h2>
         <span class="hint">${S.eintraege.filter(e => !e.geloescht && new Date(e.ts) >= weekAgo).length} Einträge in 7 Tagen · ${offen} ohne Bereich · ${letzter}</span></div>
       <div class="legend"><span><i class="sw g-selbst"></i>Selbstkompetenz</span><span><i class="sw g-sozial"></i>Sozialkompetenz</span><span><i class="sw g-lern"></i>Lernkompetenz</span><span>Streifen auf der Karte = die 8 MesK-Bereiche; farbig = es gibt Einträge</span></div>
-      ${backupHint}${kinder.length ? `<div class="cards">${cards}</div>` : `<div class="empty"><span>Noch keine Kinder angelegt.</span><button class="btn" data-demo>Beispieldaten zum Ausprobieren laden</button></div>`}
+      ${backupHint}${syncHint}${kinder.length ? `<div class="cards">${cards}</div>` : `<div class="empty"><span>Noch keine Kinder angelegt.</span><button class="btn" data-demo>Beispieldaten zum Ausprobieren laden</button></div>`}
       <form class="row" id="addKind" autocomplete="off">
         <div class="field"><label for="nKz">Neues Kind (Kürzel)</label><input type="text" id="nKz" maxlength="12" placeholder="z. B. A.M."></div>
         <div class="field"><label for="nRn">Rufname(n)</label><input type="text" id="nRn" maxlength="60" placeholder="z. B. Ali, Alessandro"></div>
@@ -13065,7 +13067,7 @@ function renderKind(){
 function renderSync(){
   const pwSet = !!S.meta.teampw;
   const seit = S.meta.letzterExport;
-  const nNeu = buildPayload(seit).eintraege.length;
+  const nNeu = buildPayload(sinceNeu()).eintraege.length;
   const sc = S.scan;
   const prog = sc.total ? `<div class="progress" aria-label="Fortschritt">${Array.from({length:sc.total}, (_,i) => `<i class="${sc.parts[i+1] ? "ok" : ""}"></i>`).join("")}</div>
      <div class="hint">${Object.keys(sc.parts).length} von ${sc.total} Codes eingelesen.</div>` : "";
@@ -13084,11 +13086,9 @@ function renderSync(){
     </section>
     <section class="panel"><h3>Senden</h3>
       <div class="row"><div class="field"><label for="sScope">Was senden?</label><select id="sScope">
-        <option value="30">Letzte 30 Tage: ${buildPayload(new Date(Date.now()-30*864e5).toISOString()).eintraege.length} Einträge (empfohlen)</option>
-        <option value="7">Letzte 7 Tage: ${buildPayload(new Date(Date.now()-7*864e5).toISOString()).eintraege.length} Einträge</option>
-        <option value="alles">Alles: ${S.eintraege.length} Einträge (inkl. Löschungen)</option>
-        <option value="neu">Nur neu seit meinem letzten Senden${seit ? " (" + new Date(seit).toLocaleDateString("de-DE") + ")" : ""}: ${nNeu} Einträge</option></select></div></div>
-      <div class="hint">Doppelte Einträge sind kein Problem – das andere Gerät übernimmt nur, was ihm fehlt.</div>
+        <option value="neu">Alles Neue seit meinem letzten Senden${seit ? " (" + new Date(seit).toLocaleDateString("de-DE") + ")" : " – noch nie gesendet"}: ${nNeu} Einträge (empfohlen)</option>
+        <option value="alles">Komplett: alle ${S.eintraege.length} Einträge – z. B. für ein neues Handy</option></select></div></div>
+      <div class="hint">Ohne Zeitgrenze: Es geht alles mit, was seit deinem letzten Senden neu ist oder geändert wurde – egal ob das eine Woche oder ein Jahr her ist (zur Sicherheit mit 14 Tagen Überlappung). Doppelte Einträge erkennt das andere Gerät.</div>
       <div class="row"><button class="btn primary" data-send-msg ${pwSet ? "" : "disabled"}>Als Nachricht senden</button>
         <button class="btn" data-send-qr ${pwSet ? "" : "disabled"}>QR-Code anzeigen</button>
         <button class="btn ghost" data-send-file ${pwSet ? "" : "disabled"}>Als Datei speichern</button></div>
@@ -13210,7 +13210,7 @@ function renderSettings(){
 /* ================= QR erzeugen ================= */
 const CHUNK = 200;
 const MSG_CHUNK = 2800;
-const APP_VERSION = "20";
+const APP_VERSION = "21";
 function drawQr(){
   const area_ = $("qrArea"); if (!area_ || !S.qr) return;
   const { parts, idx } = S.qr; const text = parts[idx];
@@ -13223,9 +13223,11 @@ function drawQr(){
   const c = $("qrc").getContext("2d"); c.fillStyle = "#fff"; c.fillRect(0,0,size,size); c.fillStyle = "#000";
   for (let r = 0; r < n; r++) for (let col = 0; col < n; col++) if (q.isDark(r, col)) c.fillRect((col+margin)*scale, (r+margin)*scale, scale, scale);
 }
+/* „Neu seit letztem Senden“ – ohne Zeitgrenze, mit 14 Tagen Überlappung als Sicherheitsabstand */
+function sinceNeu(){ const l = S.meta.letzterExport; return l ? new Date(new Date(l).getTime() - 14*864e5).toISOString() : null; }
 async function makeExport(){
   const scope = $("sScope").value;
-  const since = scope === "neu" ? S.meta.letzterExport : scope === "alles" ? null : new Date(Date.now() - (+scope)*864e5).toISOString();
+  const since = scope === "alles" ? null : sinceNeu();
   const payload = buildPayload(since);
   if (!payload.eintraege.length && !S.kinder.some(k => !since || k.geaendert > since)) { flash("Seit dem letzten Senden gibt es nichts Neues.", true); return null; }
   return { sealed: await seal(payload, S.meta.teampw), count: payload.eintraege.length };
