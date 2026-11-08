@@ -1,0 +1,167 @@
+# Logbuch ESE – baut aus index.html automatisch die Android-App (APK).
+# Läuft bei jeder neuen index.html oder per Hand: Reiter „Actions“ → „Android-App bauen“ → „Run workflow“.
+# Ergebnis: Reiter „Releases“ → neueste Version → logbuch-ese.apk
+name: Android-App bauen
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "index.html"
+      - ".github/workflows/android-app.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-app
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      KS: ${{ secrets.LOGBUCH_KEYSTORE }}
+      PW: ${{ secrets.LOGBUCH_KEYSTORE_PASSWORD }}
+    steps:
+      - name: Signierschlüssel vorhanden?
+        run: |
+          if [ -z "$KS" ] || [ -z "$PW" ]; then
+            echo "::error::Es fehlen die Secrets LOGBUCH_KEYSTORE und/oder LOGBUCH_KEYSTORE_PASSWORD (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: App-Projekt anlegen
+        run: |
+          set -e
+          mkdir -p app/www && cd app
+          cat > package.json <<'EOF'
+          {
+            "name": "logbuch-ese",
+            "version": "1.0.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor/core": "8.6.0",
+              "@capacitor/cli": "8.6.0",
+              "@capacitor/android": "8.6.0",
+              "@capacitor/filesystem": "8.1.5",
+              "@capacitor/share": "8.0.3",
+              "@capacitor/clipboard": "8.0.1",
+              "@capacitor/app": "8.1.2"
+            }
+          }
+          EOF
+          cat > capacitor.config.json <<'EOF'
+          { "appId": "de.schule.logbuchese", "appName": "Logbuch ESE", "webDir": "www" }
+          EOF
+          npm install --no-audit --no-fund
+
+          OWNER="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          if [ "$(echo "$REPO" | tr '[:upper:]' '[:lower:]')" = "$OWNER.github.io" ]; then
+            BASE="https://$OWNER.github.io/"; PFX="/"
+          else
+            BASE="https://$OWNER.github.io/$REPO/"; PFX="/$REPO"
+          fi
+          echo "LINK_BASE=$BASE" >> "$GITHUB_ENV"
+          echo "LINK_HOST=$OWNER.github.io" >> "$GITHUB_ENV"
+          echo "LINK_PFX=$PFX" >> "$GITHUB_ENV"
+
+          cp ../index.html www/index.html
+          if [ -f ../icon.svg ]; then cp ../icon.svg www/icon.svg; fi
+          cp node_modules/@capacitor/core/dist/capacitor.js www/capacitor.js
+          grep -q 'const LINK_BASE = "";' www/index.html || { echo "::error::index.html ist zu alt (Version 20 oder neuer nötig)."; exit 1; }
+          sed -i "s#const LINK_BASE = \"\";#const LINK_BASE = \"$BASE\";#" www/index.html
+          sed -i '0,/<script>/s##<script src="capacitor.js"></script><script>#' www/index.html
+          grep -o 'APP_VERSION = "[0-9]*"' www/index.html | grep -o '[0-9]*' | head -1 > ../appversion.txt
+          echo "APPV=$(cat ../appversion.txt)" >> "$GITHUB_ENV"
+
+          npx cap add android
+          npx cap sync android
+
+      - name: Android-Einstellungen anpassen
+        run: |
+          python3 - <<'EOF'
+          import os, re
+          p = "app/android/app/src/main/AndroidManifest.xml"
+          m = open(p).read()
+          # keine Google-Cloud-Sicherung der Schülerdaten
+          m = m.replace('android:allowBackup="true"', 'android:allowBackup="false" android:requestLegacyExternalStorage="true"')
+          host, pfx = os.environ["LINK_HOST"], os.environ["LINK_PFX"]
+          link = f'''
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="https" android:host="{host}" android:pathPrefix="{pfx}" />
+                      </intent-filter>
+          '''
+          m = m.replace('</intent-filter>', '</intent-filter>' + link, 1)
+          perms = '''
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="29" />
+          '''
+          m = m.replace('<uses-permission android:name="android.permission.INTERNET" />', '<uses-permission android:name="android.permission.INTERNET" />' + perms)
+          open(p, "w").write(m)
+
+          g = "app/android/app/build.gradle"
+          b = open(g).read()
+          run = os.environ["GITHUB_RUN_NUMBER"]; appv = os.environ.get("APPV", "0")
+          b = re.sub(r"versionCode \d+", f"versionCode {run}", b)
+          b = re.sub(r'versionName "[^"]*"', f'versionName "{appv}.{run}"', b)
+          open(g, "w").write(b)
+          print(m)
+          EOF
+
+      - name: App-Symbol erzeugen
+        continue-on-error: true
+        run: |
+          set -e
+          cd app
+          mkdir -p assets
+          if [ -f www/icon.svg ]; then
+            sudo apt-get install -y -qq librsvg2-bin >/dev/null
+            rsvg-convert -w 1024 -h 1024 www/icon.svg -o assets/icon-only.png
+            cp assets/icon-only.png assets/icon-foreground.png
+            npx --yes @capacitor/assets@3 generate --android --iconBackgroundColor '#1d6b58'
+          fi
+
+      - name: APK bauen
+        run: |
+          cd app/android
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: APK signieren
+        run: |
+          set -e
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          echo "$KS" | base64 -d > ks.jks
+          "$BT/zipalign" -p -f 4 app/android/app/build/outputs/apk/release/app-release-unsigned.apk aligned.apk
+          "$BT/apksigner" sign --ks ks.jks --ks-key-alias logbuch --ks-pass env:PW --key-pass env:PW --out logbuch-ese.apk aligned.apk
+          "$BT/apksigner" verify --print-certs logbuch-ese.apk | grep -i "SHA-256"
+          rm -f ks.jks
+
+      - name: Als Download bereitstellen (Reiter „Releases“)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "app-$GITHUB_RUN_NUMBER" logbuch-ese.apk \
+            --title "Logbuch ESE – App ${APPV}.${GITHUB_RUN_NUMBER}" \
+            --notes "Android-App, gebaut aus index.html (Version ${APPV}). Installieren: logbuch-ese.apk auf dem Handy herunterladen und öffnen. Ein Update wird einfach über die alte App installiert – die Daten bleiben erhalten." \
+            --latest
+          # nur die letzten 5 App-Versionen behalten
+          gh release list --limit 100 --json tagName --jq '.[].tagName' | grep '^app-' | sort -t- -k2 -n -r | tail -n +6 | while read t; do gh release delete "$t" --yes --cleanup-tag || true; done
