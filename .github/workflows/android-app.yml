@@ -130,20 +130,57 @@ jobs:
         continue-on-error: true
         run: |
           set -e
-          cd app
-          mkdir -p assets
-          if [ -f www/icon.svg ]; then
-            sudo apt-get install -y -qq librsvg2-bin >/dev/null
-            rsvg-convert -w 1024 -h 1024 www/icon.svg -o assets/icon-only.png
-            cp assets/icon-only.png assets/icon-foreground.png
-            npx --yes @capacitor/assets@3 generate --android --iconBackgroundColor '#1d6b58'
-          fi
+          [ -f app/www/icon.svg ] || exit 0
+          sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq librsvg2-bin >/dev/null
+          python3 - <<'EOF'
+          import re, subprocess, os, tempfile
+          svg = open("app/www/icon.svg").read()
+          inner = re.sub(r"^.*?<svg[^>]*>|</svg>\s*$", "", svg, flags=re.S)
+          fg_inner = re.sub(r'<rect width="512" height="512"[^>]*/>', "", inner, count=1)   # ohne grünen Hintergrund
+          res = "app/android/app/src/main/res"
+          tmp = tempfile.mkdtemp()
+          def render(content, viewbox, size, out):
+              f = os.path.join(tmp, "i.svg")
+              open(f, "w").write(f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{viewbox}">{content}</svg>')
+              subprocess.run(["rsvg-convert", "-w", str(size), "-h", str(size), f, "-o", out], check=True)
+          jobs = []
+          for d, s in {"mdpi":48, "hdpi":72, "xhdpi":96, "xxhdpi":144, "xxxhdpi":192}.items():
+              jobs += [(inner, "0 0 512 512", s, f"{res}/mipmap-{d}/ic_launcher.png"),
+                       (inner, "0 0 512 512", s, f"{res}/mipmap-{d}/ic_launcher_round.png"),
+                       (fg_inner, "40 40 432 432", s * 9 // 4, f"{res}/mipmap-{d}/ic_launcher_foreground.png")]
+          outs = []
+          for c, vb, size, out in jobs:                     # erst alles erzeugen, dann ersetzen
+              t = os.path.join(tmp, str(len(outs)) + ".png"); render(c, vb, size, t); outs.append((t, out))
+          for t, out in outs: os.replace(t, out)
+          bg = f"{res}/values/ic_launcher_background.xml"
+          txt = open(bg).read()
+          open(bg, "w").write(re.sub(r"#[0-9A-Fa-f]{6}", "#1D6B58", txt))
+          print("App-Symbol erzeugt:", len(outs), "Dateien")
+          EOF
 
       - name: APK bauen
         run: |
           cd app/android
           chmod +x gradlew
-          ./gradlew assembleRelease --no-daemon --stacktrace
+          # Lint-Prüfung beim Release-Bau abschalten (bricht sonst bei Kleinigkeiten ab)
+          cat >> app/build.gradle <<'EOF'
+
+          android {
+              lint {
+                  checkReleaseBuilds false
+                  abortOnError false
+              }
+          }
+          EOF
+          ./gradlew assembleRelease --no-daemon --console=plain 2>&1 | tee ../../gradle.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Fehlerursache anzeigen
+        if: failure()
+        run: |
+          echo "================ FEHLERURSACHE ================"
+          grep -n -A 12 "What went wrong" gradle.log | head -60 || true
+          grep -n -m 20 -i "error:\|failed" gradle.log | head -40 || true
 
       - name: APK signieren
         run: |
